@@ -24,6 +24,8 @@ from stellar_contract_bindings.php import (
     render_tuple_struct,
     render_union,
     generate_binding,
+    php_doc,
+    php_string,
 )
 
 
@@ -1338,6 +1340,304 @@ class TestPHPCommand(unittest.TestCase):
                 result = runner.invoke(command, ["--contract-id", self.CONTRACT_ID])
             self.assertEqual(result.exit_code, 0, result.output)
             self.assertTrue(os.path.exists("ContractClient.php"))
+
+
+# Spec text that would lose its marker or close the block comment it is
+# rendered into, and a field name that would end its string literal.
+_SPILL_DOC = b"First line of the doc.\nSPILL_MARKER continues the doc."
+_HOSTILE_NAME = b"it's"
+
+
+def _esc_specs():
+    """One entry of every kind that carries a doc, each documented."""
+    enum_entry = xdr.SCSpecEntry(xdr.SCSpecEntryKind.SC_SPEC_ENTRY_UDT_ENUM_V0)
+    enum_entry.udt_enum_v0 = xdr.SCSpecUDTEnumV0(
+        doc=_SPILL_DOC,
+        lib=b"",
+        name=b"DocEnum",
+        cases=[xdr.SCSpecUDTEnumCaseV0(doc=b"", name=b"First", value=xdr.Uint32(0))],
+    )
+
+    error_entry = xdr.SCSpecEntry(xdr.SCSpecEntryKind.SC_SPEC_ENTRY_UDT_ERROR_ENUM_V0)
+    error_entry.udt_error_enum_v0 = xdr.SCSpecUDTErrorEnumV0(
+        doc=_SPILL_DOC,
+        lib=b"",
+        name=b"DocError",
+        cases=[xdr.SCSpecUDTErrorEnumCaseV0(doc=b"", name=b"Bad", value=xdr.Uint32(1))],
+    )
+
+    struct_entry = xdr.SCSpecEntry(xdr.SCSpecEntryKind.SC_SPEC_ENTRY_UDT_STRUCT_V0)
+    struct_entry.udt_struct_v0 = xdr.SCSpecUDTStructV0(
+        doc=_SPILL_DOC,
+        lib=b"",
+        name=b"DocStruct",
+        fields=[
+            xdr.SCSpecUDTStructFieldV0(
+                doc=b"", name=b"amount", type=xdr.SCSpecTypeDef(xdr.SCSpecType.SC_SPEC_TYPE_U32)
+            )
+        ],
+    )
+
+    tuple_entry = xdr.SCSpecEntry(xdr.SCSpecEntryKind.SC_SPEC_ENTRY_UDT_STRUCT_V0)
+    tuple_entry.udt_struct_v0 = xdr.SCSpecUDTStructV0(
+        doc=_SPILL_DOC,
+        lib=b"",
+        name=b"DocTuple",
+        fields=[
+            xdr.SCSpecUDTStructFieldV0(
+                doc=b"", name=b"0", type=xdr.SCSpecTypeDef(xdr.SCSpecType.SC_SPEC_TYPE_U32)
+            )
+        ],
+    )
+
+    union_entry = xdr.SCSpecEntry(xdr.SCSpecEntryKind.SC_SPEC_ENTRY_UDT_UNION_V0)
+    union_entry.udt_union_v0 = xdr.SCSpecUDTUnionV0(
+        doc=_SPILL_DOC,
+        lib=b"",
+        name=b"DocUnion",
+        cases=[
+            xdr.SCSpecUDTUnionCaseV0(
+                xdr.SCSpecUDTUnionCaseV0Kind.SC_SPEC_UDT_UNION_CASE_VOID_V0,
+                void_case=xdr.SCSpecUDTUnionCaseVoidV0(doc=b"", name=b"Empty"),
+            )
+        ],
+    )
+
+    function_entry = xdr.SCSpecEntry(xdr.SCSpecEntryKind.SC_SPEC_ENTRY_FUNCTION_V0)
+    function_entry.function_v0 = xdr.SCSpecFunctionV0(
+        doc=_SPILL_DOC,
+        name=xdr.SCSymbol(sc_symbol=b"documented"),
+        inputs=[
+            xdr.SCSpecFunctionInputV0(
+                doc=_SPILL_DOC, name=b"value", type=xdr.SCSpecTypeDef(xdr.SCSpecType.SC_SPEC_TYPE_U32)
+            )
+        ],
+        outputs=[],
+    )
+
+    return [
+        enum_entry,
+        error_entry,
+        struct_entry,
+        tuple_entry,
+        union_entry,
+        function_entry,
+    ]
+
+
+def _esc_doc_enum(doc: bytes):
+    """An enum carrying the given doc, for rendering that doc on its own."""
+    entry = xdr.SCSpecEntry(xdr.SCSpecEntryKind.SC_SPEC_ENTRY_UDT_ENUM_V0)
+    entry.udt_enum_v0 = xdr.SCSpecUDTEnumV0(
+        doc=doc,
+        lib=b"",
+        name=b"DocEnum",
+        cases=[xdr.SCSpecUDTEnumCaseV0(doc=b"", name=b"One", value=xdr.Uint32(0))],
+    )
+    return entry
+
+
+def _esc_field_struct(field_name: bytes):
+    """A one-field struct whose field name carries the given text."""
+    entry = xdr.SCSpecEntry(xdr.SCSpecEntryKind.SC_SPEC_ENTRY_UDT_STRUCT_V0)
+    entry.udt_struct_v0 = xdr.SCSpecUDTStructV0(
+        doc=b"",
+        lib=b"",
+        name=b"Literal",
+        fields=[
+            xdr.SCSpecUDTStructFieldV0(
+                doc=b"", name=field_name, type=xdr.SCSpecTypeDef(xdr.SCSpecType.SC_SPEC_TYPE_U32)
+            )
+        ],
+    )
+    return entry
+
+
+def _esc_union(case_name: bytes, payload_types: int = 1):
+    """A union with a void and a tuple case, both named from the given text.
+
+    A tuple case carrying more than one payload type renders through a
+    separate template branch, so the arity is a parameter.
+    """
+    entry = xdr.SCSpecEntry(xdr.SCSpecEntryKind.SC_SPEC_ENTRY_UDT_UNION_V0)
+    entry.udt_union_v0 = xdr.SCSpecUDTUnionV0(
+        doc=b"",
+        lib=b"",
+        name=b"Wire",
+        cases=[
+            xdr.SCSpecUDTUnionCaseV0(
+                xdr.SCSpecUDTUnionCaseV0Kind.SC_SPEC_UDT_UNION_CASE_VOID_V0,
+                void_case=xdr.SCSpecUDTUnionCaseVoidV0(doc=b"", name=case_name),
+            ),
+            xdr.SCSpecUDTUnionCaseV0(
+                xdr.SCSpecUDTUnionCaseV0Kind.SC_SPEC_UDT_UNION_CASE_TUPLE_V0,
+                tuple_case=xdr.SCSpecUDTUnionCaseTupleV0(
+                    doc=b"",
+                    name=b"T" + case_name,
+                    type=[xdr.SCSpecTypeDef(xdr.SCSpecType.SC_SPEC_TYPE_U32)] * payload_types,
+                ),
+            ),
+        ],
+    )
+    return entry
+
+
+def _esc_function(
+    symbol: bytes,
+    param_doc: bytes = b"",
+    param_name: bytes = b"value",
+    returns_value: bool = False,
+):
+    """A single function entry, for the client method sites.
+
+    The client templates emit a different invoke body for a void function than
+    for one that returns a value, so both shapes are needed to reach every
+    site that names the function.
+    """
+    entry = xdr.SCSpecEntry(xdr.SCSpecEntryKind.SC_SPEC_ENTRY_FUNCTION_V0)
+    entry.function_v0 = xdr.SCSpecFunctionV0(
+        doc=b"",
+        name=xdr.SCSymbol(sc_symbol=symbol),
+        inputs=[
+            xdr.SCSpecFunctionInputV0(
+                doc=param_doc,
+                name=param_name,
+                type=xdr.SCSpecTypeDef(xdr.SCSpecType.SC_SPEC_TYPE_U32),
+            )
+        ],
+        outputs=[xdr.SCSpecTypeDef(xdr.SCSpecType.SC_SPEC_TYPE_U32)] if returns_value else [],
+    )
+    return entry
+
+
+class TestSpecTextEscaping(unittest.TestCase):
+    """Spec text reaches the output as comments and literals, never as source."""
+
+    # --- doc comments ---
+
+    def test_every_doc_site_marks_all_of_its_lines(self):
+        result = generate_binding(_esc_specs(), contract_name="DocContract")
+        marked = [line for line in result.splitlines() if "SPILL_MARKER" in line]
+        # Five documented declarations, the client method, and the @param
+        # description on both the invoke method and the transaction builder.
+        self.assertEqual(len(marked), 8)
+        self.assertTrue(all(line.strip().startswith("*") for line in marked))
+
+    def test_parameter_description_continues_under_its_tag(self):
+        result = generate_binding(_esc_specs(), contract_name="DocContract")
+        self.assertIn("* @param int $value First line of the doc.", result)
+        self.assertIn("*   SPILL_MARKER continues the doc.", result)
+
+    def test_doc_cannot_close_the_block_comment(self):
+        result = generate_binding(
+            [_esc_doc_enum(b"ends */ here")], contract_name="DocContract"
+        )
+        self.assertIn(" * ends *\\/ here", result)
+        self.assertNotIn("ends */ here", result)
+
+    def test_parameter_tag_cannot_close_the_block_comment(self):
+        # The tag carries a spec-derived parameter name, so it needs the same
+        # treatment as the description that follows it.
+        result = generate_binding(
+            [_esc_function(b"invoke", param_doc=b"desc", param_name=b"p*/x")],
+            contract_name="DocContract",
+        )
+        self.assertIn("* @param int $p*\\/x desc", result)
+        self.assertNotIn("@param int $p*/x", result)
+
+    def test_builder_doc_line_renders_the_function_name(self):
+        result = generate_binding(
+            [_esc_function(b"go_now")], contract_name="DocContract"
+        )
+        self.assertIn("* Build an AssembledTransaction for the go_now method.", result)
+
+    def test_doc_line_endings_are_normalized(self):
+        result = generate_binding(
+            [_esc_doc_enum(b"First.\r\nSecond.\rThird.")], contract_name="DocContract"
+        )
+        self.assertNotIn("\r", result)
+        self.assertIn(" * First.", result)
+        self.assertIn(" * Second.", result)
+        self.assertIn(" * Third.", result)
+
+    def test_empty_doc_uses_the_fallback(self):
+        result = generate_binding([_esc_doc_enum(b"")], contract_name="DocContract")
+        self.assertIn(" * Generated enum DocContractDocEnum", result)
+
+    def test_doc_of_only_newlines_emits_bare_markers(self):
+        self.assertEqual(php_doc(b"\n\n", "unused"), " *\n *\n *")
+
+    def test_trailing_newline_emits_a_final_bare_marker(self):
+        self.assertEqual(php_doc(b"text\n", "unused"), " * text\n *")
+
+    def test_blank_doc_line_keeps_the_marker_without_trailing_space(self):
+        self.assertEqual(php_doc(b"one\n\ntwo", "unused"), " * one\n *\n * two")
+
+    def test_prefix_is_split_and_escaped_like_the_text(self):
+        self.assertEqual(php_doc(b"desc", "fb", "", "@param x*/ "), " * @param x*\\/ desc")
+        self.assertEqual(php_doc(b"desc", "fb", "", "@param a\nb "), " * @param a\n *   b desc")
+
+    def test_error_enum_suffix_trails_the_spec_text(self):
+        self.assertEqual(php_doc(b"doc", "fb", suffix=" (Error enum)"), " * doc (Error enum)")
+        self.assertEqual(php_doc(None, "fb", suffix=" (Error enum)"), " * fb")
+
+    # --- string literals ---
+
+    def test_field_name_is_escaped_on_both_encode_and_decode(self):
+        # The encode site writes the map key and the decode site reads it back;
+        # escaping only one of them yields a client that cannot round-trip.
+        result = generate_binding(
+            [_esc_field_struct(_HOSTILE_NAME)], contract_name="DocContract"
+        )
+        self.assertIn("XdrSCVal::forSymbol('it\\'s')", result)
+        self.assertIn("$map['it\\'s']", result)
+        self.assertNotIn("$map['it's']", result)
+
+    def test_union_case_names_are_escaped_in_every_literal(self):
+        result = generate_binding([_esc_union(b"Va'r")], contract_name="DocContract")
+        self.assertIn("= 'Va\\'r'", result)
+        self.assertIn("= 'TVa\\'r'", result)
+        self.assertIn("case 'Va\\'r':", result)
+        self.assertIn("case 'TVa\\'r':", result)
+        self.assertIn("Invalid union value for TVa\\'r", result)
+        self.assertNotIn("'Va'r'", result)
+
+    def test_union_case_name_is_escaped_in_the_multi_payload_branch(self):
+        # A tuple case with more than one payload renders its own decode guard.
+        result = generate_binding(
+            [_esc_union(b"Va'r", payload_types=2)], contract_name="DocContract"
+        )
+        self.assertIn("Invalid union value for TVa\\'r: expected 3 elements", result)
+        self.assertNotIn("Invalid union value for TVa'r", result)
+
+    def test_client_method_name_is_escaped_at_both_call_sites(self):
+        for returns_value in (False, True):
+            result = generate_binding(
+                [_esc_function(b"go's", returns_value=returns_value)],
+                contract_name="DocContract",
+            )
+            self.assertEqual(result.count("name: 'go\\'s',"), 2)
+            self.assertNotIn("name: 'go's',", result)
+
+    # --- the escaper itself ---
+
+    def test_php_string_escapes_preserve_the_original_text(self):
+        self.assertEqual(php_string("back\\slash"), "back\\\\slash")
+        self.assertEqual(php_string("it's"), "it\\'s")
+
+    def test_php_string_escapes_the_backslash_first(self):
+        # Escaping the quote first would leave the backslash it introduced
+        # unescaped, and the literal would end early.
+        self.assertEqual(php_string("a\\'b"), "a\\\\\\'b")
+
+    def test_php_string_leaves_text_single_quotes_cannot_escape(self):
+        # Single quotes recognize no other escape, so a backslash added here
+        # would survive into the value.
+        self.assertEqual(php_string("line\nbreak"), "line\nbreak")
+        self.assertEqual(php_string("cost$total"), "cost$total")
+
+    def test_php_string_leaves_ordinary_text_alone(self):
+        self.assertEqual(php_string("transfer_from"), "transfer_from")
 
 
 if __name__ == "__main__":
