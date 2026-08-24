@@ -101,6 +101,59 @@ def escape_keyword(name: str) -> str:
     return name
 
 
+def kotlin_doc(
+    doc: bytes | None, fallback: str, indent: str = "", prefix: str = ""
+) -> str:
+    """Render spec doc text as the body of a KDoc block.
+
+    Doc text comes from the contract spec, so a contract can publish a doc
+    carrying newlines, which would leave the later lines without their ``*``,
+    or one of the sequences that delimit a block comment. Kotlin nests block
+    comments, so a ``/*`` in the text opens one that the block's own ``*/``
+    then closes, leaving the code that follows inside a comment; a ``*/``
+    closes the block early and lets the rest of the text through as source.
+    Every line gets its own marker and both delimiters are broken up.
+
+    ``prefix`` introduces the first line as a tag such as ``@param x``; the
+    lines that follow it are indented two spaces so that they continue the
+    same tag. It is spec-derived too, so it goes through the same escaping and
+    line splitting rather than around them.
+    """
+    text = prefix + (doc.decode() if doc else fallback)
+    text = text.replace("*/", "*\\/").replace("/*", "/\\*")
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    continuation = "  " if prefix else ""
+    # rstrip leaves a bare marker for an empty or whitespace-only line.
+    rendered = [f"{indent} * {lines[0]}".rstrip()]
+    rendered += [f"{indent} * {continuation}{line}".rstrip() for line in lines[1:]]
+    return "\n".join(rendered)
+
+
+def kotlin_string(text: str) -> str:
+    """Escape spec-derived text for a Kotlin string literal.
+
+    A double quote ends the literal and a line terminator breaks it, letting
+    the rest of the text through as source; a dollar sign starts a template
+    expression that runs code, and a backslash consumes the character after it,
+    the closing quote included. The remaining control characters go in as
+    ``\\uXXXX`` so that the literal stays printable source. Every escape used
+    here preserves the original characters, so the on-chain name the literal
+    carries is unchanged.
+    """
+    escaped = (
+        text.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("$", "\\$")
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\t", "\\t")
+    )
+    return "".join(
+        char if char >= " " and char != "\x7f" else f"\\u{ord(char):04x}"
+        for char in escaped
+    )
+
+
 def prefixed_type_name(type_name: str, class_name: str) -> str:
     """Prefix a UDT type name with the class name to avoid collisions.
 
@@ -600,7 +653,7 @@ def render_enum(entry: xdr.SCSpecUDTEnumV0, class_name: str) -> str:
     type_name = prefixed_type_name(entry.name.decode(), class_name)
     template = """
 /**
- * {{ entry.doc.decode() if entry.doc else 'Generated enum ' + type_name }}
+{{ kotlin_doc(entry.doc, 'Generated enum ' + type_name) }}
  */
 enum class {{ type_name }}(val value: UInt) {
     {%- for case in entry.cases %}
@@ -612,14 +665,18 @@ enum class {{ type_name }}(val value: UInt) {
     companion object {
         fun fromValue(value: UInt): {{ type_name }} =
             {{ type_name }}.entries.firstOrNull { it.value == value }
-                ?: throw IllegalArgumentException("Unknown {{ type_name }} value: $value")
+                ?: throw IllegalArgumentException("Unknown {{ kotlin_string(type_name) }} value: $value")
 
         fun fromSCVal(scVal: SCValXdr): {{ type_name }} = fromValue(Scv.fromUint32(scVal))
     }
 }
 """
     return Template(template).render(
-        entry=entry, type_name=type_name, escape_keyword=escape_keyword
+        entry=entry,
+        type_name=type_name,
+        escape_keyword=escape_keyword,
+        kotlin_doc=kotlin_doc,
+        kotlin_string=kotlin_string,
     )
 
 
@@ -632,7 +689,7 @@ def render_error_enum(entry: xdr.SCSpecUDTErrorEnumV0, class_name: str) -> str:
     type_name = prefixed_type_name(entry.name.decode(), class_name)
     template = """
 /**
- * {{ entry.doc.decode() if entry.doc else 'Generated error enum ' + type_name }}
+{{ kotlin_doc(entry.doc, 'Generated error enum ' + type_name) }}
  */
 enum class {{ type_name }}(val value: UInt) {
     {%- for case in entry.cases %}
@@ -644,14 +701,18 @@ enum class {{ type_name }}(val value: UInt) {
     companion object {
         fun fromValue(value: UInt): {{ type_name }} =
             {{ type_name }}.entries.firstOrNull { it.value == value }
-                ?: throw IllegalArgumentException("Unknown {{ type_name }} value: $value")
+                ?: throw IllegalArgumentException("Unknown {{ kotlin_string(type_name) }} value: $value")
 
         fun fromSCVal(scVal: SCValXdr): {{ type_name }} = fromValue(Scv.fromUint32(scVal))
     }
 }
 """
     return Template(template).render(
-        entry=entry, type_name=type_name, escape_keyword=escape_keyword
+        entry=entry,
+        type_name=type_name,
+        escape_keyword=escape_keyword,
+        kotlin_doc=kotlin_doc,
+        kotlin_string=kotlin_string,
     )
 
 
@@ -676,7 +737,7 @@ def render_struct(entry: xdr.SCSpecUDTStructV0, class_name: str) -> str:
     # entries need no explicit sort (unlike map arguments).
     template = """
 /**
- * {{ entry.doc.decode() if entry.doc else 'Generated struct ' + type_name }}
+{{ kotlin_doc(entry.doc, 'Generated struct ' + type_name) }}
  */
 data class {{ type_name }}(
     {%- for field in entry.fields %}
@@ -686,7 +747,7 @@ data class {{ type_name }}(
     fun toSCVal(): SCValXdr {
         val map = LinkedHashMap<SCValXdr, SCValXdr>()
         {%- for field in entry.fields %}
-        map[Scv.toSymbol("{{ field.name.decode() }}")] = {{ to_scval(field.type, escape_keyword(field.name.decode())) }}
+        map[Scv.toSymbol("{{ kotlin_string(field.name.decode()) }}")] = {{ to_scval(field.type, escape_keyword(field.name.decode())) }}
         {%- endfor %}
         return Scv.toMap(map)
     }
@@ -696,7 +757,7 @@ data class {{ type_name }}(
             val map = Scv.fromMap(scVal)
             return {{ type_name }}(
                 {%- for field in entry.fields %}
-                {{ escape_keyword(field.name.decode()) }} = {{ from_scval(field.type, 'map[Scv.toSymbol("' ~ field.name.decode() ~ '")]!!') }}{% if not loop.last %},{% endif %}
+                {{ escape_keyword(field.name.decode()) }} = {{ from_scval(field.type, 'map[Scv.toSymbol("' ~ kotlin_string(field.name.decode()) ~ '")]!!') }}{% if not loop.last %},{% endif %}
                 {%- endfor %}
             )
         }
@@ -710,6 +771,8 @@ data class {{ type_name }}(
         to_scval=to_scval_bound,
         from_scval=from_scval_bound,
         escape_keyword=escape_keyword,
+        kotlin_doc=kotlin_doc,
+        kotlin_string=kotlin_string,
     )
 
 
@@ -733,7 +796,7 @@ def render_tuple_struct(entry: xdr.SCSpecUDTStructV0, class_name: str) -> str:
 
     template = """
 /**
- * {{ entry.doc.decode() if entry.doc else 'Generated tuple struct ' + type_name }}
+{{ kotlin_doc(entry.doc, 'Generated tuple struct ' + type_name) }}
  */
 data class {{ type_name }}(
     {%- for field in sorted_fields %}
@@ -767,6 +830,7 @@ data class {{ type_name }}(
         to_kotlin_type=to_kotlin_type_bound,
         to_scval=to_scval_bound,
         from_scval=from_scval_bound,
+        kotlin_doc=kotlin_doc,
     )
 
 
@@ -789,7 +853,7 @@ def render_union(entry: xdr.SCSpecUDTUnionV0, class_name: str) -> str:
 
     template = """
 /**
- * {{ entry.doc.decode() if entry.doc else 'Generated union ' + type_name }}
+{{ kotlin_doc(entry.doc, 'Generated union ' + type_name) }}
  */
 sealed class {{ type_name }} {
     abstract fun toSCVal(): SCValXdr
@@ -797,7 +861,7 @@ sealed class {{ type_name }} {
     {%- if case.kind == xdr.SCSpecUDTUnionCaseV0Kind.SC_SPEC_UDT_UNION_CASE_VOID_V0 %}
 
     object {{ escape_keyword(case.void_case.name.decode()) }} : {{ type_name }}() {
-        override fun toSCVal(): SCValXdr = Scv.toVec(listOf(Scv.toSymbol("{{ case.void_case.name.decode() }}")))
+        override fun toSCVal(): SCValXdr = Scv.toVec(listOf(Scv.toSymbol("{{ kotlin_string(case.void_case.name.decode()) }}")))
     }
     {%- else %}
 
@@ -808,7 +872,7 @@ sealed class {{ type_name }} {
     ) : {{ type_name }}() {
         override fun toSCVal(): SCValXdr = Scv.toVec(
             listOf(
-                Scv.toSymbol("{{ case.tuple_case.name.decode() }}"),
+                Scv.toSymbol("{{ kotlin_string(case.tuple_case.name.decode()) }}"),
                 {%- for i in range(len(case.tuple_case.type)) %}
                 {{ to_scval(case.tuple_case.type[i], 'value' ~ i|string) }}{% if not loop.last %},{% endif %}
                 {%- endfor %}
@@ -824,16 +888,16 @@ sealed class {{ type_name }} {
             return when (val tag = Scv.fromSymbol(elements[0])) {
                 {%- for case in entry.cases %}
                 {%- if case.kind == xdr.SCSpecUDTUnionCaseV0Kind.SC_SPEC_UDT_UNION_CASE_VOID_V0 %}
-                "{{ case.void_case.name.decode() }}" -> {{ escape_keyword(case.void_case.name.decode()) }}
+                "{{ kotlin_string(case.void_case.name.decode()) }}" -> {{ escape_keyword(case.void_case.name.decode()) }}
                 {%- else %}
-                "{{ case.tuple_case.name.decode() }}" -> {{ escape_keyword(case.tuple_case.name.decode()) }}(
+                "{{ kotlin_string(case.tuple_case.name.decode()) }}" -> {{ escape_keyword(case.tuple_case.name.decode()) }}(
                     {%- for i in range(len(case.tuple_case.type)) %}
                     {{ from_scval(case.tuple_case.type[i], 'elements[' ~ (i + 1)|string ~ ']') }}{% if not loop.last %},{% endif %}
                     {%- endfor %}
                 )
                 {%- endif %}
                 {%- endfor %}
-                else -> throw IllegalArgumentException("Unknown {{ type_name }} tag: $tag")
+                else -> throw IllegalArgumentException("Unknown {{ kotlin_string(type_name) }} tag: $tag")
             }
         }
     }
@@ -848,6 +912,8 @@ sealed class {{ type_name }} {
         escape_keyword=escape_keyword,
         xdr=xdr,
         len=len,
+        kotlin_doc=kotlin_doc,
+        kotlin_string=kotlin_string,
     )
 
 
@@ -909,9 +975,9 @@ class {{ class_name }} internal constructor(val client: ContractClient) {
     {%- for entry in entries %}
 
     /**
-     * {{ entry.doc.decode() if entry.doc else 'Invoke the ' + entry.name.sc_symbol.decode() + ' contract function.' }}
+{{ kotlin_doc(entry.doc, 'Invoke the ' + entry.name.sc_symbol.decode() + ' contract function.', '    ') }}
      {%- for param in entry.inputs %}
-     * @param {{ doc_param_name(param) }} {{ param.doc.decode() if param.doc else to_kotlin_type(param.type, class_name) }}
+{{ kotlin_doc(param.doc, to_kotlin_type(param.type, class_name), '    ', '@param ' + doc_param_name(param) + ' ') }}
      {%- endfor %}
      * @param source The source account (G... or M... address)
      * @param signer KeyPair for signing; null for read-only calls
@@ -928,7 +994,7 @@ class {{ class_name }} internal constructor(val client: ContractClient) {
         signer: KeyPair?
     ) {
         client.invoke(
-            functionName = "{{ entry.name.sc_symbol.decode() }}",
+            functionName = "{{ kotlin_string(entry.name.sc_symbol.decode()) }}",
             parameters = listOf({{ encoded_params(entry.inputs) }}),
             source = source,
             signer = signer,
@@ -944,7 +1010,7 @@ class {{ class_name }} internal constructor(val client: ContractClient) {
         signer: KeyPair?
     ): {{ parse_result_type(entry.outputs) }} =
         client.invoke(
-            functionName = "{{ entry.name.sc_symbol.decode() }}",
+            functionName = "{{ kotlin_string(entry.name.sc_symbol.decode()) }}",
             parameters = listOf({{ encoded_params(entry.inputs) }}),
             source = source,
             signer = signer,
@@ -953,12 +1019,12 @@ class {{ class_name }} internal constructor(val client: ContractClient) {
     {%- endif %}
 
     /**
-     * Build an [AssembledTransaction] for the {{ entry.name.sc_symbol.decode() }} contract function.
+{{ kotlin_doc(None, 'Build an [AssembledTransaction] for the ' + entry.name.sc_symbol.decode() + ' contract function.', '    ') }}
      *
      * Use this when you need to inspect or manipulate the transaction (memos, additional
      * signatures, preconditions) before signing and submitting.
      {%- for param in entry.inputs %}
-     * @param {{ doc_param_name(param) }} {{ param.doc.decode() if param.doc else to_kotlin_type(param.type, class_name) }}
+{{ kotlin_doc(param.doc, to_kotlin_type(param.type, class_name), '    ', '@param ' + doc_param_name(param) + ' ') }}
      {%- endfor %}
      * @param source The source account (G... or M... address)
      * @param signer KeyPair for signing; null for read-only calls
@@ -971,7 +1037,7 @@ class {{ class_name }} internal constructor(val client: ContractClient) {
         signer: KeyPair?
     ): AssembledTransaction<{{ parse_result_type(entry.outputs) }}> =
         client.buildInvoke(
-            functionName = "{{ entry.name.sc_symbol.decode() }}",
+            functionName = "{{ kotlin_string(entry.name.sc_symbol.decode()) }}",
             parameters = listOf({{ encoded_params(entry.inputs) }}),
             source = source,
             signer = signer,
@@ -992,6 +1058,8 @@ class {{ class_name }} internal constructor(val client: ContractClient) {
         doc_param_name=doc_param_name,
         escape_keyword=escape_keyword,
         snake_to_camel=snake_to_camel,
+        kotlin_doc=kotlin_doc,
+        kotlin_string=kotlin_string,
         snake_to_pascal=snake_to_pascal,
     )
 

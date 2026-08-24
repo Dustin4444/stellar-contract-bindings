@@ -29,6 +29,8 @@ from stellar_contract_bindings.swift import (
     generate_binding,
     compute_codable_capability,
     command,
+    swift_doc,
+    swift_string,
 )
 
 
@@ -1701,6 +1703,350 @@ class TestSwiftCommand:
             assert os.path.exists(path)
             with open(path) as f:
                 assert "public class ContractClient {" in f.read()
+
+
+# Spec text that would spill out of a single-marker comment, and a field name
+# that would end the literal it is rendered into.
+_SPILL_DOC = b"First line of the doc.\nSPILL_MARKER continues the doc."
+_HOSTILE_NAME = b'say"hi'
+
+
+def _esc_specs():
+    """One entry of every kind that carries a doc, each documented."""
+    enum_entry = xdr.SCSpecEntry(xdr.SCSpecEntryKind.SC_SPEC_ENTRY_UDT_ENUM_V0)
+    enum_entry.udt_enum_v0 = xdr.SCSpecUDTEnumV0(
+        doc=_SPILL_DOC,
+        lib=b"",
+        name=b"DocEnum",
+        cases=[xdr.SCSpecUDTEnumCaseV0(doc=b"", name=b"First", value=xdr.Uint32(0))],
+    )
+
+    error_entry = xdr.SCSpecEntry(xdr.SCSpecEntryKind.SC_SPEC_ENTRY_UDT_ERROR_ENUM_V0)
+    error_entry.udt_error_enum_v0 = xdr.SCSpecUDTErrorEnumV0(
+        doc=_SPILL_DOC,
+        lib=b"",
+        name=b"DocError",
+        cases=[xdr.SCSpecUDTErrorEnumCaseV0(doc=b"", name=b"Bad", value=xdr.Uint32(1))],
+    )
+
+    struct_entry = xdr.SCSpecEntry(xdr.SCSpecEntryKind.SC_SPEC_ENTRY_UDT_STRUCT_V0)
+    struct_entry.udt_struct_v0 = xdr.SCSpecUDTStructV0(
+        doc=_SPILL_DOC,
+        lib=b"",
+        name=b"DocStruct",
+        fields=[
+            xdr.SCSpecUDTStructFieldV0(
+                doc=b"", name=b"amount", type=xdr.SCSpecTypeDef(type=xdr.SCSpecType.SC_SPEC_TYPE_U32)
+            )
+        ],
+    )
+
+    tuple_entry = xdr.SCSpecEntry(xdr.SCSpecEntryKind.SC_SPEC_ENTRY_UDT_STRUCT_V0)
+    tuple_entry.udt_struct_v0 = xdr.SCSpecUDTStructV0(
+        doc=_SPILL_DOC,
+        lib=b"",
+        name=b"DocTuple",
+        fields=[
+            xdr.SCSpecUDTStructFieldV0(
+                doc=b"", name=b"0", type=xdr.SCSpecTypeDef(type=xdr.SCSpecType.SC_SPEC_TYPE_U32)
+            )
+        ],
+    )
+
+    union_entry = xdr.SCSpecEntry(xdr.SCSpecEntryKind.SC_SPEC_ENTRY_UDT_UNION_V0)
+    union_entry.udt_union_v0 = xdr.SCSpecUDTUnionV0(
+        doc=_SPILL_DOC,
+        lib=b"",
+        name=b"DocUnion",
+        cases=[
+            xdr.SCSpecUDTUnionCaseV0(
+                xdr.SCSpecUDTUnionCaseV0Kind.SC_SPEC_UDT_UNION_CASE_VOID_V0,
+                void_case=xdr.SCSpecUDTUnionCaseVoidV0(doc=b"", name=b"Empty"),
+            )
+        ],
+    )
+
+    function_entry = xdr.SCSpecEntry(xdr.SCSpecEntryKind.SC_SPEC_ENTRY_FUNCTION_V0)
+    function_entry.function_v0 = xdr.SCSpecFunctionV0(
+        doc=_SPILL_DOC,
+        name=xdr.SCSymbol(sc_symbol=b"documented"),
+        inputs=[
+            xdr.SCSpecFunctionInputV0(
+                doc=_SPILL_DOC, name=b"value", type=xdr.SCSpecTypeDef(type=xdr.SCSpecType.SC_SPEC_TYPE_U32)
+            )
+        ],
+        outputs=[],
+    )
+
+    return [
+        enum_entry,
+        error_entry,
+        struct_entry,
+        tuple_entry,
+        union_entry,
+        function_entry,
+    ]
+
+
+def _esc_doc_enum(doc: bytes):
+    """An enum carrying the given doc, for rendering that doc on its own."""
+    entry = xdr.SCSpecEntry(xdr.SCSpecEntryKind.SC_SPEC_ENTRY_UDT_ENUM_V0)
+    entry.udt_enum_v0 = xdr.SCSpecUDTEnumV0(
+        doc=doc,
+        lib=b"",
+        name=b"DocEnum",
+        cases=[xdr.SCSpecUDTEnumCaseV0(doc=b"", name=b"One", value=xdr.Uint32(0))],
+    )
+    return entry
+
+
+def _esc_field_struct(field_name: bytes):
+    """A one-field struct whose field name carries the given text."""
+    entry = xdr.SCSpecEntry(xdr.SCSpecEntryKind.SC_SPEC_ENTRY_UDT_STRUCT_V0)
+    entry.udt_struct_v0 = xdr.SCSpecUDTStructV0(
+        doc=b"",
+        lib=b"",
+        name=b"Literal",
+        fields=[
+            xdr.SCSpecUDTStructFieldV0(
+                doc=b"", name=field_name, type=xdr.SCSpecTypeDef(type=xdr.SCSpecType.SC_SPEC_TYPE_U32)
+            )
+        ],
+    )
+    return entry
+
+
+def _esc_union(case_name: bytes, payload_types: int = 1):
+    """A union with a void and a tuple case, both named from the given text.
+
+    A tuple case carrying more than one payload type renders through a
+    separate template branch, so the arity is a parameter.
+    """
+    entry = xdr.SCSpecEntry(xdr.SCSpecEntryKind.SC_SPEC_ENTRY_UDT_UNION_V0)
+    entry.udt_union_v0 = xdr.SCSpecUDTUnionV0(
+        doc=b"",
+        lib=b"",
+        name=b"Wire",
+        cases=[
+            xdr.SCSpecUDTUnionCaseV0(
+                xdr.SCSpecUDTUnionCaseV0Kind.SC_SPEC_UDT_UNION_CASE_VOID_V0,
+                void_case=xdr.SCSpecUDTUnionCaseVoidV0(doc=b"", name=case_name),
+            ),
+            xdr.SCSpecUDTUnionCaseV0(
+                xdr.SCSpecUDTUnionCaseV0Kind.SC_SPEC_UDT_UNION_CASE_TUPLE_V0,
+                tuple_case=xdr.SCSpecUDTUnionCaseTupleV0(
+                    doc=b"",
+                    name=b"T" + case_name,
+                    type=[xdr.SCSpecTypeDef(type=xdr.SCSpecType.SC_SPEC_TYPE_U32)] * payload_types,
+                ),
+            ),
+        ],
+    )
+    return entry
+
+
+def _esc_function(symbol: bytes, returns_value: bool = False):
+    """A single function entry, for the client method sites.
+
+    The client templates emit a different invoke body for a void function than
+    for one that returns a value, so both shapes are needed to reach every
+    site that names the function.
+    """
+    entry = xdr.SCSpecEntry(xdr.SCSpecEntryKind.SC_SPEC_ENTRY_FUNCTION_V0)
+    entry.function_v0 = xdr.SCSpecFunctionV0(
+        doc=b"",
+        name=xdr.SCSymbol(sc_symbol=symbol),
+        inputs=[
+            xdr.SCSpecFunctionInputV0(
+                doc=b"",
+                name=b"value",
+                type=xdr.SCSpecTypeDef(type=xdr.SCSpecType.SC_SPEC_TYPE_U32),
+            )
+        ],
+        outputs=[xdr.SCSpecTypeDef(type=xdr.SCSpecType.SC_SPEC_TYPE_U32)] if returns_value else [],
+    )
+    return entry
+
+
+def _esc_udt_set(type_name: bytes):
+    """One UDT of every kind whose spec name carries the given text.
+
+    A UDT name reaches the diagnostic messages the generated code raises, so it
+    needs the same escaping as a field or case name.
+    """
+    enum_entry = xdr.SCSpecEntry(xdr.SCSpecEntryKind.SC_SPEC_ENTRY_UDT_ENUM_V0)
+    enum_entry.udt_enum_v0 = xdr.SCSpecUDTEnumV0(
+        doc=b"",
+        lib=b"",
+        name=type_name,
+        cases=[xdr.SCSpecUDTEnumCaseV0(doc=b"", name=b"One", value=xdr.Uint32(0))],
+    )
+    error_entry = xdr.SCSpecEntry(xdr.SCSpecEntryKind.SC_SPEC_ENTRY_UDT_ERROR_ENUM_V0)
+    error_entry.udt_error_enum_v0 = xdr.SCSpecUDTErrorEnumV0(
+        doc=b"",
+        lib=b"",
+        name=b"E" + type_name,
+        cases=[xdr.SCSpecUDTErrorEnumCaseV0(doc=b"", name=b"Bad", value=xdr.Uint32(1))],
+    )
+    struct_entry = xdr.SCSpecEntry(xdr.SCSpecEntryKind.SC_SPEC_ENTRY_UDT_STRUCT_V0)
+    struct_entry.udt_struct_v0 = xdr.SCSpecUDTStructV0(
+        doc=b"",
+        lib=b"",
+        name=b"S" + type_name,
+        fields=[
+            xdr.SCSpecUDTStructFieldV0(doc=b"", name=b"amount", type=xdr.SCSpecTypeDef(type=xdr.SCSpecType.SC_SPEC_TYPE_U32))
+        ],
+    )
+    tuple_entry = xdr.SCSpecEntry(xdr.SCSpecEntryKind.SC_SPEC_ENTRY_UDT_STRUCT_V0)
+    tuple_entry.udt_struct_v0 = xdr.SCSpecUDTStructV0(
+        doc=b"",
+        lib=b"",
+        name=b"T" + type_name,
+        fields=[xdr.SCSpecUDTStructFieldV0(doc=b"", name=b"0", type=xdr.SCSpecTypeDef(type=xdr.SCSpecType.SC_SPEC_TYPE_U32))],
+    )
+    union_entry = xdr.SCSpecEntry(xdr.SCSpecEntryKind.SC_SPEC_ENTRY_UDT_UNION_V0)
+    union_entry.udt_union_v0 = xdr.SCSpecUDTUnionV0(
+        doc=b"",
+        lib=b"",
+        name=b"U" + type_name,
+        cases=[
+            xdr.SCSpecUDTUnionCaseV0(
+                xdr.SCSpecUDTUnionCaseV0Kind.SC_SPEC_UDT_UNION_CASE_VOID_V0,
+                void_case=xdr.SCSpecUDTUnionCaseVoidV0(doc=b"", name=b"Empty"),
+            )
+        ],
+    )
+    return [enum_entry, error_entry, struct_entry, tuple_entry, union_entry]
+
+
+class TestSpecTextEscaping:
+    """Spec text reaches the output as comments and literals, never as source."""
+
+    # --- doc comments ---
+
+    def test_every_doc_site_marks_all_of_its_lines(self):
+        result = generate_binding(_esc_specs(), "DocContract")
+        marked = [line for line in result.splitlines() if "SPILL_MARKER" in line]
+        # Five documented declarations, the client method, and the parameter
+        # description on both the invoke method and the transaction builder.
+        assert len(marked) == 8
+        assert all(line.strip().startswith("///") for line in marked)
+
+    def test_parameter_description_continues_under_its_tag(self):
+        result = generate_binding(_esc_specs(), "DocContract")
+        assert "/// - Parameter value: First line of the doc." in result
+        assert "///   SPILL_MARKER continues the doc." in result
+
+    def test_prefix_is_split_like_the_text(self):
+        # The tag carries a spec-derived parameter name, so a newline in it
+        # would leave the comment just as one in the description would.
+        assert (
+            swift_doc(b"desc", "fb", "", "- Parameter a\nb: ")
+            == "/// - Parameter a\n///   b: desc"
+        )
+
+    def test_builder_doc_line_renders_the_function_name(self):
+        result = generate_binding([_esc_function(b"go_now")], "DocContract")
+        assert "/// Build an AssembledTransaction for the go_now method." in result
+
+    def test_doc_line_endings_are_normalized(self):
+        result = generate_binding(
+            [_esc_doc_enum(b"First.\r\nSecond.\rThird.")], "DocContract"
+        )
+        assert "\r" not in result
+        assert "/// First." in result
+        assert "/// Second." in result
+        assert "/// Third." in result
+
+    def test_empty_doc_uses_the_fallback(self):
+        result = generate_binding([_esc_doc_enum(b"")], "DocContract")
+        assert "/// Generated enum DocContractDocEnum" in result
+
+    def test_doc_of_only_newlines_emits_bare_markers(self):
+        assert swift_doc(b"\n\n", "unused") == "///\n///\n///"
+
+    def test_trailing_newline_emits_a_final_bare_marker(self):
+        assert swift_doc(b"text\n", "unused") == "/// text\n///"
+
+    def test_blank_doc_line_keeps_the_marker_without_trailing_space(self):
+        assert swift_doc(b"one\n\ntwo", "unused") == "/// one\n///\n/// two"
+
+    def test_udt_name_is_escaped_in_diagnostic_messages(self):
+        result = generate_binding(_esc_udt_set(b'Va"lue'), "C")
+        assert 'message: "Invalid SCVal type for CVa\\"lue"' in result
+        assert 'message: "Invalid value for CVa\\"lue: \\(value)"' in result
+        assert 'message: "Invalid SCVal type for CEVa\\"lueError"' in result
+        assert 'message: "Invalid value for CEVa\\"lueError: \\(value)"' in result
+        assert 'message: "Invalid SCVal type for CSVa\\"lue"' in result
+        assert 'message: "Invalid SCVal type for CTVa\\"lue"' in result
+        assert 'for CVa"lue"' not in result
+
+    # --- string literals ---
+
+    def test_field_name_is_escaped_on_both_encode_and_decode(self):
+        # The encode site writes the map key and the decode site reads it back;
+        # escaping only one of them yields a client that cannot round-trip.
+        result = generate_binding([_esc_field_struct(_HOSTILE_NAME)], "DocContract")
+        assert 'key: .symbol("say\\"hi")' in result
+        assert 'map["say\\"hi"]' in result
+        assert 'map["say"hi"]' not in result
+
+    def test_missing_field_message_escapes_the_name(self):
+        result = generate_binding([_esc_field_struct(_HOSTILE_NAME)], "DocContract")
+        assert "Missing required field 'say\\\"hi'" in result
+
+    def test_union_case_names_are_escaped_in_every_literal(self):
+        result = generate_binding([_esc_union(b'Va"r')], "DocContract")
+        assert '.symbol("Va\\"r")' in result
+        assert '.symbol("TVa\\"r")' in result
+        assert 'case "Va\\"r":' in result
+        assert 'case "TVa\\"r":' in result
+        assert 'Invalid union value for TVa\\"r' in result
+        assert '.symbol("Va"r")' not in result
+
+    def test_union_case_name_is_escaped_in_the_multi_payload_branch(self):
+        # A tuple case with more than one payload renders its own encode arm
+        # and decode guard.
+        result = generate_binding([_esc_union(b'Va"r', payload_types=2)], "DocContract")
+        assert result.count('.symbol("TVa\\"r")') == 1
+        assert 'Invalid union value for TVa\\"r: expected 3 elements' in result
+        assert '.symbol("TVa"r")' not in result
+        assert 'Invalid union value for TVa"r' not in result
+
+    def test_client_method_name_is_escaped_at_both_call_sites(self):
+        result = generate_binding([_esc_function(b'go"x')], "DocContract")
+        assert result.count('name: "go\\"x",') == 2
+        assert 'name: "go"x",' not in result
+
+    def test_client_method_name_is_escaped_when_the_call_returns_a_value(self):
+        # A returning function renders a different invoke body than a void one.
+        result = generate_binding(
+            [_esc_function(b'go"x', returns_value=True)], "DocContract"
+        )
+        assert result.count('name: "go\\"x",') == 2
+        assert 'name: "go"x",' not in result
+
+    # --- the escaper itself ---
+
+    def test_swift_string_escapes_preserve_the_original_text(self):
+        assert swift_string("back\\slash") == "back\\\\slash"
+        assert swift_string('say"hi') == 'say\\"hi'
+        assert swift_string("line\nbreak") == "line\\nbreak"
+        assert swift_string("line\rbreak") == "line\\rbreak"
+        assert swift_string("tab\there") == "tab\\there"
+
+    def test_swift_string_escapes_the_backslash_first(self):
+        # Escaping the quote first would leave the backslash it introduced
+        # unescaped, and the literal would end early.
+        assert swift_string('a\\"b') == 'a\\\\\\"b'
+
+    def test_swift_string_replaces_control_characters(self):
+        # swiftc rejects an unprintable ASCII character inside a literal.
+        assert swift_string("a\x0bb") == "a\\u{b}b"
+        assert swift_string("a\x7fb") == "a\\u{7f}b"
+
+    def test_swift_string_leaves_ordinary_text_alone(self):
+        assert swift_string("transfer_from") == "transfer_from"
 
 
 if __name__ == "__main__":

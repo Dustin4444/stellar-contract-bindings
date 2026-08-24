@@ -66,6 +66,53 @@ def escape_keyword(name: str) -> str:
     return name
 
 
+def swift_doc(
+    doc: bytes | None, fallback: str, indent: str = "", prefix: str = ""
+) -> str:
+    """Render spec doc text as a Swift doc comment.
+
+    Doc text comes from the contract spec, so a contract can publish a doc
+    carrying newlines. Emitted after a single ``///`` its later lines would
+    land in the type body as source, so every line carries its own marker.
+
+    ``prefix`` introduces the first line as a markup item such as
+    ``- Parameter name:``; the lines that follow it are indented two spaces so
+    that they continue the same item. It is spec-derived too, so it goes
+    through the same line splitting rather than around it.
+    """
+    text = prefix + (doc.decode() if doc else fallback)
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    continuation = "  " if prefix else ""
+    # rstrip leaves a bare marker for an empty or whitespace-only line.
+    rendered = [f"{indent}/// {lines[0]}".rstrip()]
+    rendered += [f"{indent}/// {continuation}{line}".rstrip() for line in lines[1:]]
+    return "\n".join(rendered)
+
+
+def swift_string(text: str) -> str:
+    """Escape spec-derived text for a double-quoted Swift string literal.
+
+    A double quote ends the literal and a line terminator breaks it, letting
+    the rest of the text through as source; a backslash starts an escape or a
+    ``\\(`` interpolation, and consumes the character after it, the closing
+    quote included. The remaining control characters do not end
+    it but the compiler rejects them in source, so they go in as ``\\u{...}``.
+    Every escape used here preserves the original characters, so the on-chain
+    name the literal carries is unchanged.
+    """
+    escaped = (
+        text.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\t", "\\t")
+    )
+    return "".join(
+        char if char >= " " and char != "\x7f" else f"\\u{{{ord(char):x}}}"
+        for char in escaped
+    )
+
+
 def prefixed_type_name(type_name: str, class_name: str, error_enum_names: frozenset = frozenset()) -> str:
     """Prefix a type name with the class name to avoid conflicts.
 
@@ -529,7 +576,7 @@ def render_enum(entry: xdr.SCSpecUDTEnumV0, class_name: str):
     """Generate Swift enum."""
     type_name = prefixed_type_name(entry.name.decode(), class_name)
     template = """
-/// {{ entry.doc.decode() if entry.doc else 'Generated enum ' + type_name }}
+{{ swift_doc(entry.doc, 'Generated enum ' + type_name) }}
 public enum {{ type_name }}: UInt32, Codable, CaseIterable {
     {%- for case in entry.cases %}
     case {{ escape_keyword(case.name.decode()) }} = {{ case.value.uint32 }}
@@ -545,23 +592,30 @@ public enum {{ type_name }}: UInt32, Codable, CaseIterable {
     /// - Throws: {{ class_name }}Error.conversionFailed if the SCVal is not a u32 or the value doesn't match any case
     public static func fromSCVal(_ val: SCValXDR) throws -> {{ type_name }} {
         guard case .u32(let value) = val else {
-            throw {{ class_name }}Error.conversionFailed(message: "Invalid SCVal type for {{ type_name }}")
+            throw {{ class_name }}Error.conversionFailed(message: "Invalid SCVal type for {{ swift_string(type_name) }}")
         }
         guard let enumCase = {{ type_name }}(rawValue: value) else {
-            throw {{ class_name }}Error.conversionFailed(message: "Invalid value for {{ type_name }}: \\(value)")
+            throw {{ class_name }}Error.conversionFailed(message: "Invalid value for {{ swift_string(type_name) }}: \\(value)")
         }
         return enumCase
     }
 }
 """
-    return Template(template).render(entry=entry, type_name=type_name, escape_keyword=escape_keyword, class_name=class_name)
+    return Template(template).render(
+        entry=entry,
+        type_name=type_name,
+        escape_keyword=escape_keyword,
+        class_name=class_name,
+        swift_doc=swift_doc,
+        swift_string=swift_string,
+    )
 
 
 def render_error_enum(entry: xdr.SCSpecUDTErrorEnumV0, class_name: str):
     """Generate Swift error enum."""
     type_name = prefixed_type_name(entry.name.decode(), class_name)
     template = """
-/// {{ entry.doc.decode() if entry.doc else 'Generated error enum ' + type_name }}
+{{ swift_doc(entry.doc, 'Generated error enum ' + type_name) }}
 public enum {{ type_name }}Error: UInt32, Error, Codable, CaseIterable {
     {%- for case in entry.cases %}
     case {{ escape_keyword(case.name.decode()) }} = {{ case.value.uint32 }}
@@ -577,16 +631,23 @@ public enum {{ type_name }}Error: UInt32, Error, Codable, CaseIterable {
     /// - Throws: {{ class_name }}Error.conversionFailed if the SCVal is not a u32 or the value doesn't match any case
     public static func fromSCVal(_ val: SCValXDR) throws -> {{ type_name }}Error {
         guard case .u32(let value) = val else {
-            throw {{ class_name }}Error.conversionFailed(message: "Invalid SCVal type for {{ type_name }}Error")
+            throw {{ class_name }}Error.conversionFailed(message: "Invalid SCVal type for {{ swift_string(type_name) }}Error")
         }
         guard let errorCase = {{ type_name }}Error(rawValue: value) else {
-            throw {{ class_name }}Error.conversionFailed(message: "Invalid value for {{ type_name }}Error: \\(value)")
+            throw {{ class_name }}Error.conversionFailed(message: "Invalid value for {{ swift_string(type_name) }}Error: \\(value)")
         }
         return errorCase
     }
 }
 """
-    return Template(template).render(entry=entry, type_name=type_name, escape_keyword=escape_keyword, class_name=class_name)
+    return Template(template).render(
+        entry=entry,
+        type_name=type_name,
+        escape_keyword=escape_keyword,
+        class_name=class_name,
+        swift_doc=swift_doc,
+        swift_string=swift_string,
+    )
 
 
 def render_struct(entry: xdr.SCSpecUDTStructV0, class_name: str, error_enum_names: frozenset = frozenset(), codable: bool = True):
@@ -609,7 +670,7 @@ def render_struct(entry: xdr.SCSpecUDTStructV0, class_name: str, error_enum_name
     # contract spec already provides sorted ascending by field name, so the map
     # entries need no explicit sort (unlike map arguments).
     template = """
-/// {{ entry.doc.decode() if entry.doc else 'Generated struct ' + type_name }}
+{{ swift_doc(entry.doc, 'Generated struct ' + type_name) }}
 public struct {{ type_name }}{{ codable_conformance }} {
     {%- for field in entry.fields %}
     public let {{ escape_keyword(field.name.decode()) }}: {{ to_swift_type(field.type) }}
@@ -629,7 +690,7 @@ public struct {{ type_name }}{{ codable_conformance }} {
         var mapEntries: [SCMapEntryXDR] = []
         {%- for field in entry.fields %}
         mapEntries.append(SCMapEntryXDR(
-            key: .symbol("{{ field.name.decode() }}"),
+            key: .symbol("{{ swift_string(field.name.decode()) }}"),
             val: {{ to_scval(field.type, escape_keyword(field.name.decode())) }}
         ))
         {%- endfor %}
@@ -642,7 +703,7 @@ public struct {{ type_name }}{{ codable_conformance }} {
     /// - Throws: {{ class_name }}Error.conversionFailed if the SCVal is not a map or required fields are missing
     public static func fromSCVal(_ val: SCValXDR) throws -> {{ type_name }} {
         guard case .map(let mapEntries) = val else {
-            throw {{ class_name }}Error.conversionFailed(message: "Invalid SCVal type for {{ type_name }}")
+            throw {{ class_name }}Error.conversionFailed(message: "Invalid SCVal type for {{ swift_string(type_name) }}")
         }
         
         var map: [String: SCValXDR] = [:]
@@ -653,8 +714,8 @@ public struct {{ type_name }}{{ codable_conformance }} {
         }
         
         {%- for field in entry.fields %}
-        guard let field_{{ loop.index0 }}_val = map["{{ field.name.decode() }}"] else {
-            throw {{ class_name }}Error.conversionFailed(message: "Missing required field '{{ field.name.decode() }}' in {{ type_name }}")
+        guard let field_{{ loop.index0 }}_val = map["{{ swift_string(field.name.decode()) }}"] else {
+            throw {{ class_name }}Error.conversionFailed(message: "Missing required field '{{ swift_string(field.name.decode()) }}' in {{ swift_string(type_name) }}")
         }
         {%- endfor %}
         
@@ -675,6 +736,8 @@ public struct {{ type_name }}{{ codable_conformance }} {
         escape_keyword=escape_keyword,
         class_name=class_name,
         codable_conformance=codable_conformance,
+        swift_doc=swift_doc,
+        swift_string=swift_string,
     )
 
 
@@ -694,7 +757,7 @@ def render_tuple_struct(entry: xdr.SCSpecUDTStructV0, class_name: str, error_enu
         return from_scval(td, name, class_name, throw_on_missing=False, error_enum_names=error_enum_names)
     
     template = """
-/// {{ entry.doc.decode() if entry.doc else 'Generated tuple struct ' + type_name }}
+{{ swift_doc(entry.doc, 'Generated tuple struct ' + type_name) }}
 public struct {{ type_name }}{{ codable_conformance }} {
     public let value: ({% for f in entry.fields %}{{ to_swift_type(f.type) }}{% if not loop.last %}, {% endif %}{% endfor %})
 
@@ -737,7 +800,7 @@ public struct {{ type_name }}{{ codable_conformance }} {
     /// - Throws: {{ class_name }}Error.conversionFailed if the SCVal is not a vec or has wrong number of elements
     public static func fromSCVal(_ val: SCValXDR) throws -> {{ type_name }} {
         guard case .vec(let elements) = val, let elements = elements else {
-            throw {{ class_name }}Error.conversionFailed(message: "Invalid SCVal type for {{ type_name }}")
+            throw {{ class_name }}Error.conversionFailed(message: "Invalid SCVal type for {{ swift_string(type_name) }}")
         }
         
         return {{ type_name }}(value: (
@@ -757,6 +820,8 @@ public struct {{ type_name }}{{ codable_conformance }} {
         class_name=class_name,
         codable=codable,
         codable_conformance=codable_conformance,
+        swift_doc=swift_doc,
+        swift_string=swift_string,
     )
 
 
@@ -777,7 +842,7 @@ def render_union(entry: xdr.SCSpecUDTUnionV0, class_name: str, error_enum_names:
         return from_scval(td, name, class_name, throw_on_missing=True, error_enum_names=error_enum_names)
     
     template = """
-/// {{ entry.doc.decode() if entry.doc else 'Generated union ' + type_name }}
+{{ swift_doc(entry.doc, 'Generated union ' + type_name) }}
 public enum {{ type_name }}{{ codable_conformance }} {
     {%- for case in entry.cases %}
     {%- if case.kind == xdr.SCSpecUDTUnionCaseV0Kind.SC_SPEC_UDT_UNION_CASE_VOID_V0 %}
@@ -796,18 +861,18 @@ public enum {{ type_name }}{{ codable_conformance }} {
         {%- for case in entry.cases %}
         {%- if case.kind == xdr.SCSpecUDTUnionCaseV0Kind.SC_SPEC_UDT_UNION_CASE_VOID_V0 %}
         case .{{ escape_keyword(case.void_case.name.decode()) }}:
-            return .vec([.symbol("{{ case.void_case.name.decode() }}")])
+            return .vec([.symbol("{{ swift_string(case.void_case.name.decode()) }}")])
         {%- else %}
         {%- if len(case.tuple_case.type) == 1 %}
         case .{{ escape_keyword(case.tuple_case.name.decode()) }}(let value):
             return .vec([
-                .symbol("{{ case.tuple_case.name.decode() }}"),
+                .symbol("{{ swift_string(case.tuple_case.name.decode()) }}"),
                 {{ to_scval(case.tuple_case.type[0], 'value') }}
             ])
         {%- else %}
         case .{{ escape_keyword(case.tuple_case.name.decode()) }}({% for i in range(len(case.tuple_case.type)) %}let value{{ i }}{% if not loop.last %}, {% endif %}{% endfor %}):
             return .vec([
-                .symbol("{{ case.tuple_case.name.decode() }}"),
+                .symbol("{{ swift_string(case.tuple_case.name.decode()) }}"),
                 {%- for i, t in enumerate(case.tuple_case.type) %}
                 {{ to_scval(t, 'value' ~ i|string) }}{% if not loop.last %},{% endif %}
                 {%- endfor %}
@@ -838,18 +903,18 @@ public enum {{ type_name }}{{ codable_conformance }} {
         switch kind {
         {%- for case in entry.cases %}
         {%- if case.kind == xdr.SCSpecUDTUnionCaseV0Kind.SC_SPEC_UDT_UNION_CASE_VOID_V0 %}
-        case "{{ case.void_case.name.decode() }}":
+        case "{{ swift_string(case.void_case.name.decode()) }}":
             return .{{ escape_keyword(case.void_case.name.decode()) }}
         {%- else %}
-        case "{{ case.tuple_case.name.decode() }}":
+        case "{{ swift_string(case.tuple_case.name.decode()) }}":
             {%- if len(case.tuple_case.type) == 1 %}
             guard vec.count == 2 else {
-                throw {{ class_name }}Error.conversionFailed(message: "Invalid union value for {{ case.tuple_case.name.decode() }}: expected 2 elements")
+                throw {{ class_name }}Error.conversionFailed(message: "Invalid union value for {{ swift_string(case.tuple_case.name.decode()) }}: expected 2 elements")
             }
             return .{{ escape_keyword(case.tuple_case.name.decode()) }}({{ from_scval(case.tuple_case.type[0], 'vec[1]') }})
             {%- else %}
             guard vec.count == {{ len(case.tuple_case.type) + 1 }} else {
-                throw {{ class_name }}Error.conversionFailed(message: "Invalid union value for {{ case.tuple_case.name.decode() }}: expected {{ len(case.tuple_case.type) + 1 }} elements")
+                throw {{ class_name }}Error.conversionFailed(message: "Invalid union value for {{ swift_string(case.tuple_case.name.decode()) }}: expected {{ len(case.tuple_case.type) + 1 }} elements")
             }
             return .{{ escape_keyword(case.tuple_case.name.decode()) }}(
                 {%- for i, t in enumerate(case.tuple_case.type) %}
@@ -877,6 +942,8 @@ public enum {{ type_name }}{{ codable_conformance }} {
         enumerate=enumerate,
         escape_keyword=escape_keyword,
         codable_conformance=codable_conformance,
+        swift_doc=swift_doc,
+        swift_string=swift_string,
     )
 
 
@@ -921,9 +988,9 @@ public class {{ class_name }} {
     }
     {%- for entry in entries %}
     
-    /// {{ entry.doc.decode() if entry.doc else 'Invoke the ' + entry.name.sc_symbol.decode() + ' method' }}
+{{ swift_doc(entry.doc, 'Invoke the ' + entry.name.sc_symbol.decode() + ' method', '    ') }}
     /// {%- for param in entry.inputs %}
-    /// - Parameter {{ escape_keyword(param.name.decode()) }}: {{ param.doc.decode() if param.doc else to_swift_type(param.type) }}
+{{ swift_doc(param.doc, to_swift_type(param.type), '    ', '- Parameter ' + escape_keyword(param.name.decode()) + ': ') }}
     {%- endfor %}
     /// - Parameter methodOptions: Options for transaction (optional)
     /// - Parameter force: Force signing and sending even if it's a read call (default: false)
@@ -942,7 +1009,7 @@ public class {{ class_name }} {
         ]
         
         {{ "let result = " if parse_result_type(entry.outputs) != "Void" else "_ = " }}try await client.invokeMethod(
-            name: "{{ entry.name.sc_symbol.decode() }}",
+            name: "{{ swift_string(entry.name.sc_symbol.decode()) }}",
             args: args,
             force: force,
             methodOptions: methodOptions
@@ -952,10 +1019,10 @@ public class {{ class_name }} {
         {%- endif %}
     }
     
-    /// Build an AssembledTransaction for the {{ entry.name.sc_symbol.decode() }} method.
+{{ swift_doc(None, 'Build an AssembledTransaction for the ' + entry.name.sc_symbol.decode() + ' method.', '    ') }}
     /// This is useful if you need to manipulate the transaction before signing and sending.
     /// {%- for param in entry.inputs %}
-    /// - Parameter {{ escape_keyword(param.name.decode()) }}: {{ param.doc.decode() if param.doc else to_swift_type(param.type) }}
+{{ swift_doc(param.doc, to_swift_type(param.type), '    ', '- Parameter ' + escape_keyword(param.name.decode()) + ': ') }}
     {%- endfor %}
     /// - Parameter methodOptions: Options for transaction (optional)
     /// - Returns: AssembledTransaction
@@ -972,7 +1039,7 @@ public class {{ class_name }} {
         ]
         
         return try await client.buildInvokeMethodTx(
-            name: "{{ entry.name.sc_symbol.decode() }}",
+            name: "{{ swift_string(entry.name.sc_symbol.decode()) }}",
             args: args,
             methodOptions: methodOptions
         )
@@ -1046,7 +1113,9 @@ enum {{ class_name }}Error: Error {
         escape_keyword=escape_keyword,
         snake_to_camel=snake_to_camel,
         snake_to_pascal=snake_to_pascal,
-        len=len
+        len=len,
+        swift_doc=swift_doc,
+        swift_string=swift_string,
     )
 
 

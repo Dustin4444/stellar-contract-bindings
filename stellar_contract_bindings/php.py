@@ -70,6 +70,54 @@ def escape_keyword(name: str) -> str:
     return name
 
 
+def php_doc(
+    doc: bytes | None,
+    fallback: str,
+    indent: str = "",
+    prefix: str = "",
+    suffix: str = "",
+) -> str:
+    """Render spec doc text as the body of a PHPDoc block.
+
+    Doc text comes from the contract spec, so a contract can publish a doc
+    carrying newlines, which would leave the later lines without their ``*``,
+    or a ``*/``, which would close the block and let the rest of the text
+    through as source. Every line gets its own marker and the sequence that
+    ends a block comment is broken up. A ``/*`` needs no such treatment: PHP
+    block comments do not nest.
+
+    ``prefix`` introduces the first line as a tag such as ``@param int $x``;
+    the lines that follow it are indented two spaces so that they continue the
+    same tag. It carries a spec-derived parameter name, so it goes through the
+    same escaping and line splitting rather than around them. ``suffix``
+    trails the spec text, and is dropped along with it when the entry carries
+    no doc and the fallback is used instead.
+    """
+    text = prefix + (doc.decode() + suffix if doc else fallback)
+    text = text.replace("*/", "*\\/")
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    continuation = "  " if prefix else ""
+    # rstrip leaves a bare marker for an empty or whitespace-only line.
+    rendered = [f"{indent} * {lines[0]}".rstrip()]
+    rendered += [f"{indent} * {continuation}{line}".rstrip() for line in lines[1:]]
+    return "\n".join(rendered)
+
+
+def php_string(text: str) -> str:
+    """Escape spec-derived text for a single-quoted PHP string literal.
+
+    Only a backslash and a single quote are special inside single quotes, and
+    both escapes preserve the original characters, so the on-chain name the
+    literal carries is unchanged. A newline and the control characters are
+    legal inside a PHP string, and single quotes have no escape that would
+    reproduce them, so they are left alone.
+
+    Every spec-derived PHP literal the templates emit is single quoted, so
+    this is the only PHP escaper.
+    """
+    return text.replace("\\", "\\\\").replace("'", "\\'")
+
+
 def prefixed_type_name(type_name: str, class_name: str) -> str:
     """Prefix a type name with the class name to avoid conflicts.
     
@@ -392,11 +440,7 @@ def render_enum(entry: xdr.SCSpecUDTEnumV0, class_name: str):
     type_name = prefixed_type_name(entry.name.decode(), class_name)
     template = """
 /**
-{%- if entry.doc %}
- * {{ entry.doc.decode() }}
-{%- else %}
- * Generated enum {{ type_name }}
-{%- endif %}
+{{ php_doc(entry.doc, 'Generated enum ' + type_name) }}
  */
 enum {{ type_name }}: int
 {
@@ -415,7 +459,7 @@ enum {{ type_name }}: int
     }
 }
 """
-    return Template(template).render(entry=entry, type_name=type_name)
+    return Template(template).render(entry=entry, type_name=type_name, php_doc=php_doc)
 
 
 def render_error_enum(entry: xdr.SCSpecUDTErrorEnumV0, class_name: str):
@@ -423,11 +467,7 @@ def render_error_enum(entry: xdr.SCSpecUDTErrorEnumV0, class_name: str):
     type_name = prefixed_type_name(entry.name.decode(), class_name)
     template = """
 /**
-{%- if entry.doc %}
- * {{ entry.doc.decode() }} (Error enum)
-{%- else %}
- * Generated error enum {{ type_name }}
-{%- endif %}
+{{ php_doc(entry.doc, 'Generated error enum ' + type_name, suffix=' (Error enum)') }}
  */
 enum {{ type_name }}: int
 {
@@ -446,7 +486,7 @@ enum {{ type_name }}: int
     }
 }
 """
-    return Template(template).render(entry=entry, type_name=type_name)
+    return Template(template).render(entry=entry, type_name=type_name, php_doc=php_doc)
 
 
 def render_struct(entry: xdr.SCSpecUDTStructV0, class_name: str):
@@ -457,11 +497,7 @@ def render_struct(entry: xdr.SCSpecUDTStructV0, class_name: str):
     # entries need no explicit sort (unlike map arguments).
     template = """
 /**
-{%- if entry.doc %}
- * {{ entry.doc.decode() }}
-{%- else %}
- * Generated struct {{ type_name }}
-{%- endif %}
+{{ php_doc(entry.doc, 'Generated struct ' + type_name) }}
  */
 class {{ type_name }}
 {
@@ -484,7 +520,7 @@ class {{ type_name }}
         $mapEntries = [];
         {%- for field in entry.fields %}
         $mapEntries[] = new XdrSCMapEntry(
-            XdrSCVal::forSymbol('{{ field.name.decode() }}'),
+            XdrSCVal::forSymbol('{{ php_string(field.name.decode()) }}'),
             {{ to_scval(field.type, '$this->' ~ escape_keyword(field.name.decode()), class_name) }}
         );
         {%- endfor %}
@@ -499,7 +535,7 @@ class {{ type_name }}
         }
         return new self(
             {%- for field in entry.fields %}
-            {{ escape_keyword(field.name.decode()) }}: {{ from_scval(field.type, 'map["' ~ field.name.decode() ~ '"]', class_name) }}{% if not loop.last %},{% endif %}
+            {{ escape_keyword(field.name.decode()) }}: {{ from_scval(field.type, "map['" ~ php_string(field.name.decode()) ~ "']", class_name) }}{% if not loop.last %},{% endif %}
             {%- endfor %}
         );
     }
@@ -512,7 +548,9 @@ class {{ type_name }}
         to_php_type=to_php_type,
         to_scval=to_scval,
         from_scval=from_scval,
-        escape_keyword=escape_keyword
+        escape_keyword=escape_keyword,
+        php_doc=php_doc,
+        php_string=php_string,
     )
 
 
@@ -521,11 +559,7 @@ def render_tuple_struct(entry: xdr.SCSpecUDTStructV0, class_name: str):
     type_name = prefixed_type_name(entry.name.decode(), class_name)
     template = """
 /**
-{%- if entry.doc %}
- * {{ entry.doc.decode() }}
-{%- else %}
- * Generated tuple struct {{ type_name }}
-{%- endif %}
+{{ php_doc(entry.doc, 'Generated tuple struct ' + type_name) }}
  */
 class {{ type_name }}
 {
@@ -565,7 +599,8 @@ class {{ type_name }}
         class_name=class_name,
         to_php_type=to_php_type,
         to_scval=to_scval,
-        from_scval=from_scval
+        from_scval=from_scval,
+        php_doc=php_doc,
     )
 
 
@@ -574,19 +609,15 @@ def render_union(entry: xdr.SCSpecUDTUnionV0, class_name: str):
     type_name = prefixed_type_name(entry.name.decode(), class_name)
     template = """
 /**
-{%- if entry.doc %}
- * {{ entry.doc.decode() }}
-{%- else %}
- * Generated union {{ type_name }}
-{%- endif %}
+{{ php_doc(entry.doc, 'Generated union ' + type_name) }}
  */
 class {{ type_name }}
 {
     public const {% for case in entry.cases -%}
     {%- if case.kind == xdr.SCSpecUDTUnionCaseV0Kind.SC_SPEC_UDT_UNION_CASE_VOID_V0 -%}
-    {{ case.void_case.name.decode().upper() }} = '{{ case.void_case.name.decode() }}'
+    {{ case.void_case.name.decode().upper() }} = '{{ php_string(case.void_case.name.decode()) }}'
     {%- else -%}
-    {{ case.tuple_case.name.decode().upper() }} = '{{ case.tuple_case.name.decode() }}'
+    {{ case.tuple_case.name.decode().upper() }} = '{{ php_string(case.tuple_case.name.decode()) }}'
     {%- endif -%}
     {%- if not loop.last %}, {% else %};{% endif -%}
     {%- endfor %}
@@ -660,13 +691,13 @@ class {{ type_name }}
         switch ($kind) {
             {%- for case in entry.cases %}
             {%- if case.kind == xdr.SCSpecUDTUnionCaseV0Kind.SC_SPEC_UDT_UNION_CASE_VOID_V0 %}
-            case '{{ case.void_case.name.decode() }}':
+            case '{{ php_string(case.void_case.name.decode()) }}':
                 return new self(self::{{ case.void_case.name.decode().upper() }});
             {%- else %}
-            case '{{ case.tuple_case.name.decode() }}':
+            case '{{ php_string(case.tuple_case.name.decode()) }}':
                 {%- if len(case.tuple_case.type) == 1 %}
                 if (count($val->vec) !== 2) {
-                    throw new Exception("Invalid union value for {{ case.tuple_case.name.decode() }}: expected 2 elements");
+                    throw new Exception('Invalid union value for {{ php_string(case.tuple_case.name.decode()) }}: expected 2 elements');
                 }
                 return new self(
                     self::{{ case.tuple_case.name.decode().upper() }},
@@ -674,7 +705,7 @@ class {{ type_name }}
                 );
                 {%- else %}
                 if (count($val->vec) !== {{ len(case.tuple_case.type) + 1 }}) {
-                    throw new Exception("Invalid union value for {{ case.tuple_case.name.decode() }}: expected {{ len(case.tuple_case.type) + 1 }} elements");
+                    throw new Exception('Invalid union value for {{ php_string(case.tuple_case.name.decode()) }}: expected {{ len(case.tuple_case.type) + 1 }} elements');
                 }
                 return new self(
                     self::{{ case.tuple_case.name.decode().upper() }},
@@ -703,7 +734,9 @@ class {{ type_name }}
         xdr=xdr,
         len=len,
         camel_to_snake=camel_to_snake,
-        enumerate=enumerate
+        enumerate=enumerate,
+        php_doc=php_doc,
+        php_string=php_string,
     )
 
 
@@ -772,14 +805,10 @@ class {{ contract_name }}
     {%- for entry in entries %}
 
     /**
-    {%- if entry.doc %}
-     * {{ entry.doc.decode() }}
-    {%- else %}
-     * Invoke the {{ entry.name.sc_symbol.decode() }} method
-    {%- endif %}
+{{ php_doc(entry.doc, 'Invoke the ' + entry.name.sc_symbol.decode() + ' method', '    ') }}
      *
     {%- for param in entry.inputs %}
-     * @param {{ to_php_type(param.type, False, contract_name) }} ${{ escape_keyword(param.name.decode()) }}
+{{ php_doc(param.doc, '', '    ', '@param ' + to_php_type(param.type, False, contract_name) + ' $' + escape_keyword(param.name.decode()) + ' ') }}
     {%- endfor %}
      * @param MethodOptions|null $methodOptions Options for transaction
      * @return {{ parse_result_type(entry.outputs) }}
@@ -799,7 +828,7 @@ class {{ contract_name }}
         ];
         
         {% if parse_result_type(entry.outputs) != "void" %}$result = {% endif %}$this->client->invokeMethod(
-            name: '{{ entry.name.sc_symbol.decode() }}',
+            name: '{{ php_string(entry.name.sc_symbol.decode()) }}',
             args: $args,
             methodOptions: $methodOptions
         );
@@ -809,11 +838,11 @@ class {{ contract_name }}
     }
 
     /**
-     * Build an AssembledTransaction for the {{ entry.name.sc_symbol.decode() }} method.
+{{ php_doc(None, 'Build an AssembledTransaction for the ' + entry.name.sc_symbol.decode() + ' method.', '    ') }}
      * This is useful if you need to manipulate the transaction before signing and sending.
      *
     {%- for param in entry.inputs %}
-     * @param {{ to_php_type(param.type, False, contract_name) }} ${{ escape_keyword(param.name.decode()) }}
+{{ php_doc(param.doc, '', '    ', '@param ' + to_php_type(param.type, False, contract_name) + ' $' + escape_keyword(param.name.decode()) + ' ') }}
     {%- endfor %}
      * @param MethodOptions|null $methodOptions Options for transaction
      * @return AssembledTransaction
@@ -833,7 +862,7 @@ class {{ contract_name }}
         ];
         
         return $this->client->buildInvokeMethodTx(
-            name: '{{ entry.name.sc_symbol.decode() }}',
+            name: '{{ php_string(entry.name.sc_symbol.decode()) }}',
             args: $args,
             methodOptions: $methodOptions
         );
@@ -878,7 +907,9 @@ class {{ contract_name }}
         escape_keyword=escape_keyword,
         snake_to_camel=snake_to_camel,
         snake_to_pascal=snake_to_pascal,
-        len=len
+        len=len,
+        php_doc=php_doc,
+        php_string=php_string,
     )
 
 

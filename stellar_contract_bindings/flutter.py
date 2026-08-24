@@ -129,6 +129,48 @@ def camel_to_snake(text: str) -> str:
             result += char
     return result
 
+
+def dart_doc(doc: bytes | None, fallback: str, indent: str = "") -> str:
+    """Render spec doc text as a Dart doc comment.
+
+    Doc text comes from the contract spec, so a contract can publish a doc
+    carrying newlines. Emitted after a single ``///`` its later lines would
+    land in the class body as source, so every line carries its own marker.
+    """
+    text = doc.decode() if doc else fallback
+    lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+    # rstrip leaves a bare marker for an empty or whitespace-only line.
+    return "\n".join(f"{indent}/// {line}".rstrip() for line in lines)
+
+
+def dart_string(text: str) -> str:
+    """Escape spec-derived text for a single-quoted Dart string literal.
+
+    A single quote ends the literal and a line terminator breaks it, letting
+    the rest of the text through as source; a dollar sign starts an
+    interpolation that runs code, and a backslash consumes the character after
+    it, the closing quote included. The remaining control characters go in as
+    ``\\u{...}`` so that the literal stays printable source. Every escape used
+    here preserves the original characters, so the on-chain name the literal
+    carries is unchanged.
+
+    Every spec-derived Dart literal the templates emit is single quoted, so
+    this is the only Dart escaper.
+    """
+    escaped = (
+        text.replace("\\", "\\\\")
+        .replace("'", "\\'")
+        .replace("$", "\\$")
+        .replace("\n", "\\n")
+        .replace("\r", "\\r")
+        .replace("\t", "\\t")
+    )
+    return "".join(
+        char if char >= " " and char != "\x7f" else f"\\u{{{ord(char):x}}}"
+        for char in escaped
+    )
+
+
 def to_dart_type(td: xdr.SCSpecTypeDef, nullable: bool = False, class_name: str = "") -> str:
     t = td.type
     nullable_suffix = "?" if nullable else ""
@@ -440,7 +482,7 @@ import 'package:stellar_flutter_sdk/stellar_flutter_sdk.dart';
 def render_enum(entry: xdr.SCSpecUDTEnumV0, class_name: str):
     type_name = prefixed_type_name(entry.name.decode(), class_name)
     template = """
-/// {{ entry.doc.decode() if entry.doc else type_name + ' enum' }}
+{{ dart_doc(entry.doc, type_name + ' enum') }}
 enum {{ type_name }} {
   {%- for case in entry.cases %}
   {{ snake_to_camel(case.name.decode(), False) }}({{ case.value.uint32 }}){% if loop.last %};{% else %},{% endif %}
@@ -453,7 +495,7 @@ enum {{ type_name }} {
   factory {{ type_name }}.fromValue(int value) {
     return {{ type_name }}.values.firstWhere(
       (e) => e.value == value,
-      orElse: () => throw ArgumentError('Unknown {{ type_name }} value: $value'),
+      orElse: () => throw ArgumentError('Unknown {{ dart_string(type_name) }} value: $value'),
     );
   }
   
@@ -467,7 +509,11 @@ enum {{ type_name }} {
 }
 """
     rendered_code = Template(template).render(
-        entry=entry, type_name=type_name, snake_to_camel=snake_to_camel
+        entry=entry,
+        type_name=type_name,
+        snake_to_camel=snake_to_camel,
+        dart_doc=dart_doc,
+        dart_string=dart_string,
     )
     return rendered_code
 
@@ -475,7 +521,7 @@ enum {{ type_name }} {
 def render_error_enum(entry: xdr.SCSpecUDTErrorEnumV0, class_name: str):
     type_name = prefixed_type_name(entry.name.decode(), class_name)
     template = """
-/// {{ entry.doc.decode() if entry.doc else type_name + ' error enum' }}
+{{ dart_doc(entry.doc, type_name + ' error enum') }}
 enum {{ type_name }} {
   {%- for case in entry.cases %}
   {{ snake_to_camel(case.name.decode(), False) }}({{ case.value.uint32 }}){% if loop.last %};{% else %},{% endif %}
@@ -488,7 +534,7 @@ enum {{ type_name }} {
   factory {{ type_name }}.fromValue(int value) {
     return {{ type_name }}.values.firstWhere(
       (e) => e.value == value,
-      orElse: () => throw ArgumentError('Unknown {{ type_name }} value: $value'),
+      orElse: () => throw ArgumentError('Unknown {{ dart_string(type_name) }} value: $value'),
     );
   }
   
@@ -502,7 +548,11 @@ enum {{ type_name }} {
 }
 """
     rendered_code = Template(template).render(
-        entry=entry, type_name=type_name, snake_to_camel=snake_to_camel
+        entry=entry,
+        type_name=type_name,
+        snake_to_camel=snake_to_camel,
+        dart_doc=dart_doc,
+        dart_string=dart_string,
     )
     return rendered_code
 
@@ -525,7 +575,7 @@ def render_struct(entry: xdr.SCSpecUDTStructV0, class_name: str):
     # contract spec already provides sorted ascending by field name, so the map
     # entries need no explicit sort (unlike map arguments).
     template = """
-/// {{ entry.doc.decode() if entry.doc else type_name + ' struct' }}
+{{ dart_doc(entry.doc, type_name + ' struct') }}
 class {{ type_name }} {
   {%- for field in entry.fields %}
   final {{ to_dart_type(field.type) }} {{ escape_identifier(field.name.decode()) }};
@@ -541,7 +591,7 @@ class {{ type_name }} {
     final fields = <XdrSCMapEntry>[];
     {%- for field in entry.fields %}
     fields.add(XdrSCMapEntry(
-      XdrSCVal.forSymbol('{{ field.name_r.decode() if field.name_r else field.name.decode() }}'),
+      XdrSCVal.forSymbol('{{ dart_string(field.name_r.decode() if field.name_r else field.name.decode()) }}'),
       {{ to_scval(field.type, escape_identifier(field.name.decode())) }},
     ));
     {%- endfor %}
@@ -557,7 +607,7 @@ class {{ type_name }} {
     
     return {{ type_name }}(
       {%- for field in entry.fields %}
-      {{ escape_identifier(field.name.decode()) }}: {{ from_scval(field.type, 'fieldsMap["' ~ (field.name_r.decode() if field.name_r else field.name.decode()) ~ '"]!') }},
+      {{ escape_identifier(field.name.decode()) }}: {{ from_scval(field.type, "fieldsMap['" ~ dart_string(field.name_r.decode() if field.name_r else field.name.decode()) ~ "']!") }},
       {%- endfor %}
     );
   }
@@ -586,6 +636,8 @@ class {{ type_name }} {
         from_scval=from_scval_bound,
         snake_to_camel=snake_to_camel,
         escape_identifier=escape_identifier,
+        dart_doc=dart_doc,
+        dart_string=dart_string,
     )
     return rendered_code
 
@@ -604,7 +656,7 @@ def render_tuple_struct(entry: xdr.SCSpecUDTStructV0, class_name: str):
         return from_scval(td, name, class_name)
     
     template = """
-/// {{ entry.doc.decode() if entry.doc else type_name + ' tuple struct' }}
+{{ dart_doc(entry.doc, type_name + ' tuple struct') }}
 class {{ type_name }} {
   final ({% for f in entry.fields %}{{ to_dart_type(f.type) }}{% if not loop.last %}, {% endif %}{% endfor %}) value;
 
@@ -641,7 +693,8 @@ class {{ type_name }} {
         type_name=type_name,
         to_dart_type=to_dart_type_bound,
         to_scval=to_scval_bound,
-        from_scval=from_scval_bound
+        from_scval=from_scval_bound,
+        dart_doc=dart_doc,
     )
     return rendered_code
 
@@ -664,9 +717,9 @@ def render_union(entry: xdr.SCSpecUDTUnionV0, class_name: str):
 enum {{ type_name }}Kind {
   {%- for case in entry.cases %}
   {%- if case.kind == xdr.SCSpecUDTUnionCaseV0Kind.SC_SPEC_UDT_UNION_CASE_VOID_V0 %}
-  {{ snake_to_camel(case.void_case.name.decode(), False) }}('{{ case.void_case.name_r.decode() if case.void_case.name_r else case.void_case.name.decode() }}'){% if loop.last %};{% else %},{% endif %}
+  {{ snake_to_camel(case.void_case.name.decode(), False) }}('{{ dart_string(case.void_case.name_r.decode() if case.void_case.name_r else case.void_case.name.decode()) }}'){% if loop.last %};{% else %},{% endif %}
   {%- else %}
-  {{ snake_to_camel(case.tuple_case.name.decode(), False) }}('{{ case.tuple_case.name_r.decode() if case.tuple_case.name_r else case.tuple_case.name.decode() }}'){% if loop.last %};{% else %},{% endif %}
+  {{ snake_to_camel(case.tuple_case.name.decode(), False) }}('{{ dart_string(case.tuple_case.name_r.decode() if case.tuple_case.name_r else case.tuple_case.name.decode()) }}'){% if loop.last %};{% else %},{% endif %}
   {%- endif %}
   {%- endfor %}
 
@@ -677,17 +730,21 @@ enum {{ type_name }}Kind {
   factory {{ type_name }}Kind.fromValue(String value) {
     return {{ type_name }}Kind.values.firstWhere(
       (e) => e.value == value,
-      orElse: () => throw ArgumentError('Unknown {{ type_name }}Kind value: $value'),
+      orElse: () => throw ArgumentError('Unknown {{ dart_string(type_name) }}Kind value: $value'),
     );
   }
 }
 """
     kind_enum_rendered_code = Template(kind_enum_template).render(
-        entry=entry, type_name=type_name, xdr=xdr, snake_to_camel=snake_to_camel
+        entry=entry,
+        type_name=type_name,
+        xdr=xdr,
+        snake_to_camel=snake_to_camel,
+        dart_string=dart_string,
     )
 
     template = """
-/// {{ entry.doc.decode() if entry.doc else type_name + ' union' }}
+{{ dart_doc(entry.doc, type_name + ' union') }}
 class {{ type_name }} {
   final {{ type_name }}Kind kind;
   {%- for case in entry.cases %}
@@ -833,6 +890,7 @@ class {{ type_name }} {
         snake_to_camel=snake_to_camel,
         escape_identifier=escape_identifier,
         enumerate=enumerate,
+        dart_doc=dart_doc,
     )
     return kind_enum_rendered_code + "\n" + union_rendered_code
 
@@ -878,7 +936,7 @@ class {{ class_name }} {
       
   {%- for entry in entries %}
   
-  /// {{ entry.doc.decode() if entry.doc else 'Invokes the ' + entry.name.sc_symbol.decode() + ' method' }}
+{{ dart_doc(entry.doc, 'Invokes the ' + entry.name.sc_symbol.decode() + ' method', '  ') }}
   {%- if parse_result_type(entry.outputs) == 'void' %}
   Future<void> {{ escape_identifier(entry.name.sc_symbol.decode()) }}({
   {%- else %}
@@ -907,7 +965,7 @@ class {{ class_name }} {
     );
 
     {% if parse_result_type(entry.outputs) == 'void' %}await{% else %}final result = await{% endif %} _client.invokeMethod(
-      name: '{{ entry.name.sc_symbol_r.decode() if entry.name.sc_symbol_r else entry.name.sc_symbol.decode() }}',
+      name: '{{ dart_string(entry.name.sc_symbol_r.decode() if entry.name.sc_symbol_r else entry.name.sc_symbol.decode()) }}',
       args: args,
       force: force,
       methodOptions: methodOptions,
@@ -918,7 +976,7 @@ class {{ class_name }} {
     {%- endif %}
   }
   
-  /// Builds an AssembledTransaction for the {{ entry.name.sc_symbol.decode() }} method.
+{{ dart_doc(None, 'Builds an AssembledTransaction for the ' + entry.name.sc_symbol.decode() + ' method.', '  ') }}
   /// This is useful if you need to manipulate the transaction before signing and sending.
   Future<AssembledTransaction> build{{ snake_to_camel(entry.name.sc_symbol.decode(), False) }}Tx({
     {%- for param in entry.inputs %}
@@ -933,7 +991,7 @@ class {{ class_name }} {
     ];
     
     return await _client.buildInvokeMethodTx(
-      name: '{{ entry.name.sc_symbol_r.decode() if entry.name.sc_symbol_r else entry.name.sc_symbol.decode() }}',
+      name: '{{ dart_string(entry.name.sc_symbol_r.decode() if entry.name.sc_symbol_r else entry.name.sc_symbol.decode()) }}',
       args: args,
       methodOptions: methodOptions,
     );
@@ -974,6 +1032,8 @@ class {{ class_name }} {
         snake_to_camel=snake_to_camel,
         escape_identifier=escape_identifier,
         class_name=class_name,
+        dart_doc=dart_doc,
+        dart_string=dart_string,
     )
     return client_rendered_code
 

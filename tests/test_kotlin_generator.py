@@ -29,6 +29,8 @@ from stellar_contract_bindings.kmp import (
     render_client,
     generate_binding,
     command,
+    kotlin_doc,
+    kotlin_string,
 )
 
 
@@ -1149,3 +1151,360 @@ class TestCommand:
                 "class Contract internal constructor(val client: ContractClient)"
                 in content
             )
+
+
+# Spec text that would lose its marker or close the block comment it is
+# rendered into, and a field name that would end its string literal.
+_SPILL_DOC = b"First line of the doc.\nSPILL_MARKER continues the doc."
+_HOSTILE_NAME = b'co$t"x'
+
+
+def _esc_specs():
+    """One entry of every kind that carries a doc, each documented."""
+    enum_entry = xdr.SCSpecEntry(xdr.SCSpecEntryKind.SC_SPEC_ENTRY_UDT_ENUM_V0)
+    enum_entry.udt_enum_v0 = xdr.SCSpecUDTEnumV0(
+        doc=_SPILL_DOC,
+        lib=b"",
+        name=b"DocEnum",
+        cases=[xdr.SCSpecUDTEnumCaseV0(doc=b"", name=b"First", value=xdr.Uint32(0))],
+    )
+
+    error_entry = xdr.SCSpecEntry(xdr.SCSpecEntryKind.SC_SPEC_ENTRY_UDT_ERROR_ENUM_V0)
+    error_entry.udt_error_enum_v0 = xdr.SCSpecUDTErrorEnumV0(
+        doc=_SPILL_DOC,
+        lib=b"",
+        name=b"DocError",
+        cases=[xdr.SCSpecUDTErrorEnumCaseV0(doc=b"", name=b"Bad", value=xdr.Uint32(1))],
+    )
+
+    struct_entry = xdr.SCSpecEntry(xdr.SCSpecEntryKind.SC_SPEC_ENTRY_UDT_STRUCT_V0)
+    struct_entry.udt_struct_v0 = xdr.SCSpecUDTStructV0(
+        doc=_SPILL_DOC,
+        lib=b"",
+        name=b"DocStruct",
+        fields=[
+            xdr.SCSpecUDTStructFieldV0(
+                doc=b"", name=b"amount", type=_t(xdr.SCSpecType.SC_SPEC_TYPE_U32)
+            )
+        ],
+    )
+
+    tuple_entry = xdr.SCSpecEntry(xdr.SCSpecEntryKind.SC_SPEC_ENTRY_UDT_STRUCT_V0)
+    tuple_entry.udt_struct_v0 = xdr.SCSpecUDTStructV0(
+        doc=_SPILL_DOC,
+        lib=b"",
+        name=b"DocTuple",
+        fields=[
+            xdr.SCSpecUDTStructFieldV0(
+                doc=b"", name=b"0", type=_t(xdr.SCSpecType.SC_SPEC_TYPE_U32)
+            )
+        ],
+    )
+
+    union_entry = xdr.SCSpecEntry(xdr.SCSpecEntryKind.SC_SPEC_ENTRY_UDT_UNION_V0)
+    union_entry.udt_union_v0 = xdr.SCSpecUDTUnionV0(
+        doc=_SPILL_DOC,
+        lib=b"",
+        name=b"DocUnion",
+        cases=[
+            xdr.SCSpecUDTUnionCaseV0(
+                xdr.SCSpecUDTUnionCaseV0Kind.SC_SPEC_UDT_UNION_CASE_VOID_V0,
+                void_case=xdr.SCSpecUDTUnionCaseVoidV0(doc=b"", name=b"Empty"),
+            )
+        ],
+    )
+
+    function_entry = xdr.SCSpecEntry(xdr.SCSpecEntryKind.SC_SPEC_ENTRY_FUNCTION_V0)
+    function_entry.function_v0 = xdr.SCSpecFunctionV0(
+        doc=_SPILL_DOC,
+        name=xdr.SCSymbol(sc_symbol=b"documented"),
+        inputs=[
+            xdr.SCSpecFunctionInputV0(
+                doc=_SPILL_DOC, name=b"value", type=_t(xdr.SCSpecType.SC_SPEC_TYPE_U32)
+            )
+        ],
+        outputs=[],
+    )
+
+    return [
+        enum_entry,
+        error_entry,
+        struct_entry,
+        tuple_entry,
+        union_entry,
+        function_entry,
+    ]
+
+
+def _esc_doc_enum(doc: bytes):
+    """An enum carrying the given doc, for rendering that doc on its own."""
+    entry = xdr.SCSpecEntry(xdr.SCSpecEntryKind.SC_SPEC_ENTRY_UDT_ENUM_V0)
+    entry.udt_enum_v0 = xdr.SCSpecUDTEnumV0(
+        doc=doc,
+        lib=b"",
+        name=b"DocEnum",
+        cases=[xdr.SCSpecUDTEnumCaseV0(doc=b"", name=b"One", value=xdr.Uint32(0))],
+    )
+    return entry
+
+
+def _esc_field_struct(field_name: bytes):
+    """A one-field struct whose field name carries the given text."""
+    entry = xdr.SCSpecEntry(xdr.SCSpecEntryKind.SC_SPEC_ENTRY_UDT_STRUCT_V0)
+    entry.udt_struct_v0 = xdr.SCSpecUDTStructV0(
+        doc=b"",
+        lib=b"",
+        name=b"Literal",
+        fields=[
+            xdr.SCSpecUDTStructFieldV0(
+                doc=b"", name=field_name, type=_t(xdr.SCSpecType.SC_SPEC_TYPE_U32)
+            )
+        ],
+    )
+    return entry
+
+
+def _esc_union(case_name: bytes):
+    """A union with a void and a tuple case, both named from the given text."""
+    entry = xdr.SCSpecEntry(xdr.SCSpecEntryKind.SC_SPEC_ENTRY_UDT_UNION_V0)
+    entry.udt_union_v0 = xdr.SCSpecUDTUnionV0(
+        doc=b"",
+        lib=b"",
+        name=b"Wire",
+        cases=[
+            xdr.SCSpecUDTUnionCaseV0(
+                xdr.SCSpecUDTUnionCaseV0Kind.SC_SPEC_UDT_UNION_CASE_VOID_V0,
+                void_case=xdr.SCSpecUDTUnionCaseVoidV0(doc=b"", name=case_name),
+            ),
+            xdr.SCSpecUDTUnionCaseV0(
+                xdr.SCSpecUDTUnionCaseV0Kind.SC_SPEC_UDT_UNION_CASE_TUPLE_V0,
+                tuple_case=xdr.SCSpecUDTUnionCaseTupleV0(
+                    doc=b"",
+                    name=b"T" + case_name,
+                    type=[_t(xdr.SCSpecType.SC_SPEC_TYPE_U32)],
+                ),
+            ),
+        ],
+    )
+    return entry
+
+
+def _esc_function(symbol: bytes, returns_value: bool = False):
+    """A single function entry, for the client method sites.
+
+    The client templates emit a different invoke body for a void function than
+    for one that returns a value, so both shapes are needed to reach every
+    site that names the function.
+    """
+    entry = xdr.SCSpecEntry(xdr.SCSpecEntryKind.SC_SPEC_ENTRY_FUNCTION_V0)
+    entry.function_v0 = xdr.SCSpecFunctionV0(
+        doc=b"",
+        name=xdr.SCSymbol(sc_symbol=symbol),
+        inputs=[
+            xdr.SCSpecFunctionInputV0(
+                doc=b"",
+                name=b"value",
+                type=_t(xdr.SCSpecType.SC_SPEC_TYPE_U32),
+            )
+        ],
+        outputs=[_t(xdr.SCSpecType.SC_SPEC_TYPE_U32)] if returns_value else [],
+    )
+    return entry
+
+
+def _esc_udt_set(type_name: bytes):
+    """One UDT of every kind whose spec name carries the given text.
+
+    A UDT name reaches the diagnostic messages the generated code raises, so it
+    needs the same escaping as a field or case name.
+    """
+    enum_entry = xdr.SCSpecEntry(xdr.SCSpecEntryKind.SC_SPEC_ENTRY_UDT_ENUM_V0)
+    enum_entry.udt_enum_v0 = xdr.SCSpecUDTEnumV0(
+        doc=b"",
+        lib=b"",
+        name=type_name,
+        cases=[xdr.SCSpecUDTEnumCaseV0(doc=b"", name=b"One", value=xdr.Uint32(0))],
+    )
+    error_entry = xdr.SCSpecEntry(xdr.SCSpecEntryKind.SC_SPEC_ENTRY_UDT_ERROR_ENUM_V0)
+    error_entry.udt_error_enum_v0 = xdr.SCSpecUDTErrorEnumV0(
+        doc=b"",
+        lib=b"",
+        name=b"E" + type_name,
+        cases=[xdr.SCSpecUDTErrorEnumCaseV0(doc=b"", name=b"Bad", value=xdr.Uint32(1))],
+    )
+    struct_entry = xdr.SCSpecEntry(xdr.SCSpecEntryKind.SC_SPEC_ENTRY_UDT_STRUCT_V0)
+    struct_entry.udt_struct_v0 = xdr.SCSpecUDTStructV0(
+        doc=b"",
+        lib=b"",
+        name=b"S" + type_name,
+        fields=[
+            xdr.SCSpecUDTStructFieldV0(doc=b"", name=b"amount", type=_t(xdr.SCSpecType.SC_SPEC_TYPE_U32))
+        ],
+    )
+    tuple_entry = xdr.SCSpecEntry(xdr.SCSpecEntryKind.SC_SPEC_ENTRY_UDT_STRUCT_V0)
+    tuple_entry.udt_struct_v0 = xdr.SCSpecUDTStructV0(
+        doc=b"",
+        lib=b"",
+        name=b"T" + type_name,
+        fields=[xdr.SCSpecUDTStructFieldV0(doc=b"", name=b"0", type=_t(xdr.SCSpecType.SC_SPEC_TYPE_U32))],
+    )
+    union_entry = xdr.SCSpecEntry(xdr.SCSpecEntryKind.SC_SPEC_ENTRY_UDT_UNION_V0)
+    union_entry.udt_union_v0 = xdr.SCSpecUDTUnionV0(
+        doc=b"",
+        lib=b"",
+        name=b"U" + type_name,
+        cases=[
+            xdr.SCSpecUDTUnionCaseV0(
+                xdr.SCSpecUDTUnionCaseV0Kind.SC_SPEC_UDT_UNION_CASE_VOID_V0,
+                void_case=xdr.SCSpecUDTUnionCaseVoidV0(doc=b"", name=b"Empty"),
+            )
+        ],
+    )
+    return [enum_entry, error_entry, struct_entry, tuple_entry, union_entry]
+
+
+class TestSpecTextEscaping:
+    """Spec text reaches the output as comments and literals, never as source."""
+
+    # --- doc comments ---
+
+    def test_every_doc_site_marks_all_of_its_lines(self):
+        result = generate_binding(
+            _esc_specs(), package="com.example", class_name="DocContract"
+        )
+        marked = [line for line in result.splitlines() if "SPILL_MARKER" in line]
+        # Five documented declarations, the client method, and the @param
+        # description on both the invoke method and the transaction builder.
+        assert len(marked) == 8
+        assert all(line.strip().startswith("*") for line in marked)
+
+    def test_parameter_description_continues_under_its_tag(self):
+        result = generate_binding(
+            _esc_specs(), package="com.example", class_name="DocContract"
+        )
+        assert "* @param value First line of the doc." in result
+        assert "*   SPILL_MARKER continues the doc." in result
+
+    def test_doc_cannot_close_the_block_comment(self):
+        result = generate_binding(
+            [_esc_doc_enum(b"ends */ here")],
+            package="com.example",
+            class_name="DocContract",
+        )
+        assert " * ends *\\/ here" in result
+        assert "ends */ here" not in result
+
+    def test_doc_cannot_open_a_nested_block_comment(self):
+        # Kotlin nests block comments, so an unescaped /* would swallow the
+        # code after the block's own terminator.
+        result = generate_binding(
+            [_esc_doc_enum(b"opens /* here")],
+            package="com.example",
+            class_name="DocContract",
+        )
+        assert " * opens /\\* here" in result
+        assert "opens /* here" not in result
+
+    def test_prefix_is_escaped_and_split_like_the_text(self):
+        # The tag carries a spec-derived parameter name, so it needs the same
+        # treatment as the description that follows it.
+        assert kotlin_doc(b"desc", "fb", "", "@param x*/ ") == " * @param x*\\/ desc"
+        assert kotlin_doc(b"desc", "fb", "", "@param a\nb ") == " * @param a\n *   b desc"
+
+    def test_builder_doc_line_renders_the_function_name(self):
+        result = generate_binding(
+            [_esc_function(b"go_now")], package="com.example", class_name="DocContract"
+        )
+        assert "* Build an [AssembledTransaction] for the go_now contract function." in result
+
+    def test_doc_line_endings_are_normalized(self):
+        result = generate_binding(
+            [_esc_doc_enum(b"First.\r\nSecond.\rThird.")],
+            package="com.example",
+            class_name="DocContract",
+        )
+        assert "\r" not in result
+        assert " * First." in result
+        assert " * Second." in result
+        assert " * Third." in result
+
+    def test_empty_doc_uses_the_fallback(self):
+        result = generate_binding(
+            [_esc_doc_enum(b"")], package="com.example", class_name="DocContract"
+        )
+        assert " * Generated enum DocContractDocEnum" in result
+
+    def test_doc_of_only_newlines_emits_bare_markers(self):
+        assert kotlin_doc(b"\n\n", "unused") == " *\n *\n *"
+
+    def test_trailing_newline_emits_a_final_bare_marker(self):
+        assert kotlin_doc(b"text\n", "unused") == " * text\n *"
+
+    def test_blank_doc_line_keeps_the_marker_without_trailing_space(self):
+        assert kotlin_doc(b"one\n\ntwo", "unused") == " * one\n *\n * two"
+
+    def test_udt_name_is_escaped_in_diagnostic_messages(self):
+        result = generate_binding(
+            _esc_udt_set(b"Va$lue"), package="com.example", class_name="C"
+        )
+        assert 'IllegalArgumentException("Unknown CVa\\$lue value: $value")' in result
+        assert 'IllegalArgumentException("Unknown CEVa\\$lue value: $value")' in result
+        assert 'IllegalArgumentException("Unknown CUVa\\$lue tag: $tag")' in result
+        assert '"Unknown CVa$lue value:' not in result
+
+    # --- string literals ---
+
+    def test_field_name_is_escaped_on_both_encode_and_decode(self):
+        # The encode site writes the map key and the decode site reads it back;
+        # escaping only one of them yields a client that cannot round-trip.
+        result = generate_binding(
+            [_esc_field_struct(_HOSTILE_NAME)],
+            package="com.example",
+            class_name="DocContract",
+        )
+        assert result.count('Scv.toSymbol("co\\$t\\"x")') == 2
+        assert 'Scv.toSymbol("co$t"x")' not in result
+
+    def test_union_case_names_are_escaped_in_every_literal(self):
+        result = generate_binding(
+            [_esc_union(b"Va$r")], package="com.example", class_name="DocContract"
+        )
+        assert 'Scv.toSymbol("Va\\$r")' in result
+        assert 'Scv.toSymbol("TVa\\$r")' in result
+        assert '"Va\\$r" ->' in result
+        assert '"TVa\\$r" ->' in result
+        assert 'Scv.toSymbol("Va$r")' not in result
+
+    def test_client_method_name_is_escaped_at_every_call_site(self):
+        # A void call and a returning call render different invoke bodies, and
+        # each pairs with the transaction builder.
+        for returns_value in (False, True):
+            result = generate_binding(
+                [_esc_function(b"go$x", returns_value=returns_value)],
+                package="com.example",
+                class_name="DocContract",
+            )
+            assert result.count('functionName = "go\\$x",') == 2
+            assert 'functionName = "go$x",' not in result
+
+    # --- the escaper itself ---
+
+    def test_kotlin_string_escapes_preserve_the_original_text(self):
+        assert kotlin_string("back\\slash") == "back\\\\slash"
+        assert kotlin_string('say"hi') == 'say\\"hi'
+        assert kotlin_string("cost$total") == "cost\\$total"
+        assert kotlin_string("line\nbreak") == "line\\nbreak"
+        assert kotlin_string("line\rbreak") == "line\\rbreak"
+        assert kotlin_string("tab\there") == "tab\\there"
+
+    def test_kotlin_string_escapes_the_backslash_first(self):
+        # Escaping the quote first would leave the backslash it introduced
+        # unescaped, and the literal would end early.
+        assert kotlin_string('a\\"b') == 'a\\\\\\"b'
+
+    def test_kotlin_string_replaces_control_characters(self):
+        assert kotlin_string("a\x0bb") == "a\\u000bb"
+        assert kotlin_string("a\x7fb") == "a\\u007fb"
+
+    def test_kotlin_string_leaves_ordinary_text_alone(self):
+        assert kotlin_string("transfer_from") == "transfer_from"
