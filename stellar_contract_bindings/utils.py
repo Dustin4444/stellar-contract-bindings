@@ -45,12 +45,17 @@ def get_specs_by_wasm_hash(wasm_hash: bytes, rpc_url: str) -> list[xdr.SCSpecEnt
 
 
 def get_specs_by_contract_id(contract_id: str, rpc_url: str) -> list[xdr.SCSpecEntry]:
-    """Get the wasm hash by contract id.
+    """Get the contract specs by contract id.
 
     :param contract_id: The contract id.
     :param rpc_url: The Soroban RPC URL.
-    :return: The wasm hash.
-    :raises ValueError: If contract not found.
+    :return: The contract specs.
+    :raises ValueError: If the contract is not found, or if a CAP-85 external
+        reference names an owner that is not a contract.
+    :raises ExternalRefNotFoundError: If an external reference's tag entry is
+        missing or archived.
+    :raises ContractWasmRetrievalError: If an external reference's tag entry
+        does not hold a valid wasm hash.
     """
     with SorobanServer(rpc_url) as server:
         key = xdr.LedgerKey(
@@ -77,6 +82,18 @@ def get_specs_by_contract_id(contract_id: str, rpc_url: str) -> list[xdr.SCSpecE
             return get_specs_by_wasm_hash(
                 data.contract_data.val.instance.executable.wasm_hash.hash, rpc_url
             )
+        elif (
+                data.contract_data.val.instance.executable.type
+                == xdr.ContractExecutableType.CONTRACT_EXECUTABLE_EXTERNAL_REF
+        ):
+            # A CAP-85 external reference names its code indirectly: the owner
+            # contract holds a persistent tag entry whose value is the wasm
+            # hash. The resolved value is always a wasm hash, never another
+            # reference, so a single resolution step suffices.
+            wasm_hash = server.get_external_ref_wasm_hash(
+                data.contract_data.val.instance.executable.external_ref
+            )
+            return get_specs_by_wasm_hash(wasm_hash, rpc_url)
         else:
             raise ValueError(
                 f"Unknown executable type, type: {data.contract_data.val.instance.executable.type}"
