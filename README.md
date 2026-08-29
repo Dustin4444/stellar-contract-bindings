@@ -25,6 +25,8 @@ Please check the help message for the most up-to-date usage information:
 stellar-contract-bindings --help
 ```
 
+The contract id may name any contract instance: one carrying its own Wasm, a Stellar Asset Contract, or a CAP-85 external executable reference, which is resolved through its owner contract automatically.
+
 ### Examples
 
 #### Python
